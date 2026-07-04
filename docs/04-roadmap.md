@@ -153,7 +153,7 @@ flowchart TB
 
 - [ ] Temporal workflow 定义：`preflight → fetch×N → filter → enrich×M(child workflow) → aggregate → write`
 - [ ] Celery Beat 薄触发器（仅 `client.start_workflow(...)`）
-- [ ] LiteLLM 网关接入，每个固定 LLM 场景定义 tool schema（`ArticleEnrichment` / `ClusterJudgment` / `DigestSummary` 等），`tool_choice` 强制指向该 tool
+- [ ] LiteLLM 网关接入，每个固定 LLM 场景定义 tool schema（`ArticleEnrichment` / `ClusterJudgment` / `DigestSummary` 等）。**`tool_choice` 统一用 `auto`**（每个场景只提供一个 tool + prompt 明确要求调用）——M0 用真实网关实测过强制 tool_choice（`{"type":"function","function":{"name":...}}` / `required`），发现是否支持因模型而异（DeepSeek v4 系列在这台网关的任何调用路径下都不支持，Qwen 系列需要额外传 `extra_body={"enable_thinking": False}` 才支持），以"能跑通"为核心目标，不再为追求强制模式的确定性引入按模型分支的调用逻辑；正确性交给下一条的 Instructor 校验兜底。实测 `auto` 模式下 DeepSeek v4 的 reasoning 开销很小（约 30 reasoning_tokens），不构成性能顾虑。已验证支持强制模式的模型清单见 `backend/config/models.yaml` 的 `tool_choice_forced` 字段（仅供参考，不是本项目的调用策略依据）。
 - [ ] Instructor 重试次数设到最低（1 或 0），失败直接抛异常交给 Temporal activity 重试策略统一处理，避免嵌套重试
 - [ ] Postgres 备份策略（`pg_dump` 定期快照，是否需要 WAL 归档做 PITR 待定，见 03 §7 问题 7）
 - [ ] （可选）Langfuse 接入，经 LiteLLM callback

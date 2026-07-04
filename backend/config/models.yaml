@@ -1,0 +1,68 @@
+# 自建 LiteLLM 网关当前支持的模型列表（配置数据，非代码）。
+# 更新方式：网关侧上/下线模型后手动同步这份文件，不由代码自动探测——
+# 和 04-roadmap.md §2.1 的信息源注册表是同一种"配置数据"处理方式。
+#
+# 各 activity 具体用哪个模型是后续里程碑（M1+）的业务设计问题，本文件只负责
+# "网关上现在有什么可选"，不在这里定默认模型/按场景分配策略。
+#
+# 项目实际调用策略（04-roadmap.md §2.8）：统一用 tool_choice="auto"，不做强制模式，
+# 不按这个字段做按模型分支的调用逻辑——以下 tool_choice_forced 字段仅作参考存档，
+# 记录 2026-07-04 用 openai SDK 直连网关 /openai/v1 实测的强制模式支持情况（这几个
+# 是训练数据里没有的 2026 新模型版本，没有文档可查，只能实测）：
+#   ok                        强制 tool_choice 直接可用，不需要额外参数
+#   needs_enable_thinking_false 默认 thinking 模式拒绝强制 tool_choice，
+#                              加 extra_body={"enable_thinking": False} 后可用
+#   unsupported                thinking 模式常驻（两种协议、传或不传各种 thinking 参数都试过），
+#                              强制 tool_choice 不可用；tool_choice="auto" 完全正常，reasoning 开销很小
+#   untested                   还没有实测过
+
+categories:
+  - name: DeepSeek 系列
+    models:
+      - id: deepseek-v4-pro
+        tool_choice_forced: unsupported
+      - id: deepseek-v4-flash
+        tool_choice_forced: unsupported
+
+  - name: Qwen 商业系列
+    models:
+      - id: qwen3.7-max
+        tool_choice_forced: needs_enable_thinking_false
+      - id: qwen3.7-plus
+        tool_choice_forced: needs_enable_thinking_false
+      - id: qwen3.6-plus
+        tool_choice_forced: needs_enable_thinking_false
+      - id: qwen3.6-flash
+        tool_choice_forced: needs_enable_thinking_false
+
+  - name: 本地 vLLM
+    models:
+      - id: qwen3.5-27b
+        tool_choice_forced: untested
+      - id: qwen2.5-32b
+        tool_choice_forced: untested
+      - id: qwen3.6-35b
+        tool_choice_forced: untested
+
+  - name: 智谱 GLM
+    models:
+      - id: glm-5.2
+        tool_choice_forced: untested
+      - id: glm-5.1
+        tool_choice_forced: untested
+      - id: glm-4.7
+        tool_choice_forced: untested
+      - id: glm-5-turbo
+        tool_choice_forced: ok
+      - id: glm-5.2-bailian
+        tool_choice_forced: untested
+        note: glm-5.2 的百炼兜底路由
+
+  - name: 月之暗面 Kimi
+    models:
+      - id: kimi-k2.6
+        tool_choice_forced: untested
+      - id: kimi-k2.5
+        tool_choice_forced: ok
+      - id: kimi-k2.7-code
+        tool_choice_forced: untested

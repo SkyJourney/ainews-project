@@ -1,7 +1,7 @@
 # M0 — 项目骨架跑通
 
 > 前置依赖：无（起点）
-> 状态：进行中（LiteLLM 连通性验证待真实 `.env` 填入后补跑，其余全部完成）
+> 状态：已完成
 > 关联文档：[00-overview.md](../00-overview.md) §4 架构图 · [04-roadmap.md](../04-roadmap.md) §4 M0 · [03-architecture-proposal.md](../03-architecture-proposal.md) §3 数据模型 / §5 部署拓扑
 
 ## 目标
@@ -34,8 +34,10 @@
   **落地方式**：`temporalio/auto-setup:1.24` + `temporalio/ui:2.31.2`（UI 端口 `8088`，gRPC 端口 `7233`，均为避开本机占用端口后重新选取）。**踩坑**：compose 里最初给 auto-setup 配了 `DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml`，该路径在这个镜像版本里不存在，导致容器崩溃重启循环；移除该环境变量后恢复正常——不是所有 Temporal 部署教程里的环境变量都适用于所有镜像版本，遇到崩溃循环先看日志里的具体报错，不要照抄。Worker 代码：`backend/worker/{activities,workflows,worker}.py`，`HelloWorldWorkflow` 调 `say_hello` activity。
 - [x] 部署 Redis + Celery Beat，能触发一次 `start_workflow`
   **落地方式**：`backend/beat/celery_app.py` 定义 `beat_schedule`，`backend/beat/tasks.py` 里的 task 用 Temporal Python Client 直接 `start_workflow`。M0 占位排期是每 5 分钟触发一次（仅验证链路，M1/M3 设计真实抓取排期后需替换）。`celery-worker`/`celery-beat` 两个服务共用 `temporal-worker` 的同一个镜像，只是 `command` 不同。
-- [ ] 部署 / 接入自建 LiteLLM 网关，跑通一次强制 `tool_choice` 的结构化调用
-  **未完成原因**：真实 `LITELLM_BASE_URL`/`LITELLM_API_KEY` 还没有填入 `/Volumes/Docker/compose/ainews-service/.env`（当前留空）。骨架已经预留好环境变量透传（`temporal-worker` 服务的 `environment` 段），待真实值填入后可单独跑一次验证，不阻塞 M0 其余部分。
+- [x] 部署 / 接入自建 LiteLLM 网关，跑通一次强制 `tool_choice` 的结构化调用
+  **落地方式**：真实 `LITELLM_BASE_URL`/`LITELLM_API_KEY` 已填入 `/Volumes/Docker/compose/ainews-service/.env`。**`base_url` 必须是 `https://.../openai/v1`**——这个网关在 `/openai/v1` 和裸 `/v1` 下挂的是**两套完全独立的模型注册表**（用 `/model/info` 与 `/openai/v1/model/info` 分别查证实：同一个模型名在两边指向不同的 `litellm_provider`/`api_base`，裸 `/v1` 那套走各厂商的 Anthropic 兼容端点，`/openai/v1` 那套才是走各厂商真正的原生 OpenAI 兼容端点，如 `deepseek-v4-flash` → `https://api.deepseek.com/v1`）；排查连通性问题时，先确认查的是哪套注册表，不要拿裸 `/model/info` 的结果去解释 `/openai/v1` 调用的行为，这是两码事——本次踩过这个坑，多绕了一圈。新增 `backend/config/models.yaml` 记录网关当前支持的 17 个模型（配置数据，非代码，和 04 §2.1 信息源注册表同一处理方式）。验证方式：`docker compose run --rm temporal-worker python -c "..."`（走 `/openai/v1`），`openai` SDK 强制 `tool_choice={"type":"function","function":{"name":"report_status"}}`，`glm-5-turbo`/`kimi-k2.5` 均返回完全正确的结构化 JSON，验证通过。
+  **重要发现与最终策略（详情见 `backend/config/models.yaml` 的 `tool_choice_forced` 字段，权威规则见 04-roadmap.md §2.8）**：不同模型对"强制 tool_choice"的支持程度不一致——`deepseek-v4-flash`/`deepseek-v4-pro` 在这台网关的任何调用路径（OpenAI 协议原生端点 / Anthropic 协议裸端点，传或不传各种 thinking 相关参数）下都不支持强制 tool_choice，报 `"Thinking mode does not support this tool_choice"`；Qwen 系列（`qwen3.6-flash`/`qwen3.6-plus`/`qwen3.7-plus`/`qwen3.7-max`）默认同样拒绝，但加 `extra_body={"enable_thinking": False}` 后可以支持；`glm-5-turbo`/`kimi-k2.5` 不需要任何额外参数直接支持。**排查过程踩过两个坑**：① `base_url` 少了 `/openai/v1` 前缀会落到网关另一套走 Anthropic 兼容端点的模型注册表，报错和真实原因无关；② 一度怀疑是 Anthropic 协议本身的"thinking 模式禁止强制 tool_choice"限制传导过来的，但用 Anthropic 裸端点+不传 thinking 参数实测后证明和协议选型无关——DeepSeek v4 就是恒定 thinking 开启，两种协议表现一致。
+  **最终决定：不再为追求强制模式的确定性做按模型分支的调用逻辑，统一用 `tool_choice="auto"`**（每个场景只提供一个 tool + prompt 明确要求调用，正确性交给 Instructor 校验 + Temporal 重试兜底）。实测 `auto` 模式下 DeepSeek v4 的 reasoning 开销很小（`reasoning_tokens` 约 27-31，`reasoning_content` 只有 60-70 字符），响应稳定、参数正确，不构成性能顾虑，也不是"将就的降级方案"。`models.yaml` 里的 `tool_choice_forced` 字段作为参考保留，不是本项目实际采用的调用策略。
 - [x] 编写启动说明文档
   **落地方式**：见本文件顶部关联文档 + `docs/05-process.md`；两份 docker-compose.yml 各自在文件头部注释里写明用途和相互关系，不再单独开一份 README。
 
