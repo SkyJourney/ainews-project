@@ -103,6 +103,17 @@ class ArticleGist(BaseModel):
     gist: str = Field(description="用一段中文话概括这篇文章讲了什么，供聚合/展示阶段使用")
 
 
+class TranslationCompletenessReview(BaseModel):
+    """翻译完整性复审 tool schema：机械 CJK 占比校验未通过时，独立判断这是真的翻译
+    缺失，还是专有名词/品牌名/数据表格密度天然偏高导致的误判（04 §2.4 深度诊断新增，
+    只在机械校验已经判定"不通过"之后触发，不替代机械校验，只是复核减少误杀）。"""
+
+    is_complete: bool = Field(
+        description="对照原文逐段核对：译文是否完整传达了原文全部信息（允许专有名词/品牌名/代码/数据表格保留英文或数字原样）"
+    )
+    reason: str = Field(description="判断依据，一句话说明具体理由")
+
+
 class ArticleMetadata(BaseModel):
     """富元数据抽取 tool schema（04 §2.4）：只判断"这篇文章本身是什么"，不做跨文章判断。"""
 

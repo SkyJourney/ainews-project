@@ -34,7 +34,13 @@ from temporalio import activity
 
 from worker.db import upsert_enriched_article
 from worker.llm_client import call_structured
-from worker.schemas import ArticleGist, ArticleMetadata, ChunkTranslation, TitleTranslation
+from worker.schemas import (
+    ArticleGist,
+    ArticleMetadata,
+    ChunkTranslation,
+    TitleTranslation,
+    TranslationCompletenessReview,
+)
 
 USER_AGENT = "ainews-service/0.1 (+https://github.com/SkyJourney/ainews-project)"
 TRANSLATE_MODEL = "deepseek-v4-flash"
@@ -325,7 +331,12 @@ _TRACKING_PIXEL_MARKDOWN_RE = re.compile(
 def _strip_tracking_pixel_refs(markdown: str) -> str:
     return _TRACKING_PIXEL_MARKDOWN_RE.sub("", markdown)
 
-_KNOWN_BOILERPLATE_RE = re.compile(r"[ \t]*#{1,6}[ \t]*(References & Citations|Bibliographic and Citation Tools)\b")
+# "Keep reading" 是 openai.com 文章页"相关文章推荐"区块的固定标题，其后紧跟站点
+# 页脚整片导航菜单（Research/Products/API Platform/.../Terms & Policies），跟
+# arxiv 的 References & Citations 是同一类"已知区块，按标记截断"噪声。
+_KNOWN_BOILERPLATE_RE = re.compile(
+    r"[ \t]*#{1,6}[ \t]*(References & Citations|Bibliographic and Citation Tools|Keep reading)\b"
+)
 
 
 def _strip_known_boilerplate(markdown: str) -> str:
@@ -334,6 +345,51 @@ def _strip_known_boilerplate(markdown: str) -> str:
     """
     match = _KNOWN_BOILERPLATE_RE.search(markdown)
     return markdown[: match.start()].rstrip() if match else markdown
+
+
+# openai.com 文章页顶部会重复渲染两遍站内导航（桌面/移动两套 DOM），Jina Reader
+# 兜底通道拿到的是整页 markdown，没有 trafilatura 的正文定位能力，这段噪声会跟真正
+# 的标题、正文一起被送去翻译。按已知的、跨文章稳定不变的头部标记截断（不含具体文章
+# 信息，纯站点模板，可安全应用到所有源——不匹配时是无副作用的 no-op）。
+_OPENAI_HEADER_NAV_RE = re.compile(
+    r"^\[Skip to main content\]\([^)]*\).*?"
+    r"\[Try ChatGPT\(opens in a new window\)\]\(https://chatgpt\.com/\)Login\n*",
+    re.DOTALL,
+)
+
+
+def _strip_openai_header_nav(markdown: str) -> str:
+    return _OPENAI_HEADER_NAV_RE.sub("", markdown, count=1)
+
+
+# 整段重复内容去重：响应式页面常见同一 DOM 元素被桌面/移动两套布局重复渲染，
+# M4 深度诊断实测发现 a16z"更多文章"侧栏、arxiv"查看许可证"图标块都逐字重复了
+# 2-3 次，拖累翻译完整性校验的 CJK 占比。只保留第一次出现；只对足够长的段落生效，
+# 避免误伤本来就会重复出现的短标记（如 "---" 分隔符）。
+_DEDUP_MIN_PARAGRAPH_CHARS = 40
+
+
+def _dedup_repeated_paragraphs(markdown: str) -> str:
+    paragraphs = markdown.split("\n\n")
+    seen: set[str] = set()
+    kept: list[str] = []
+    for para in paragraphs:
+        normalized = para.strip()
+        if len(normalized) >= _DEDUP_MIN_PARAGRAPH_CHARS:
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+        kept.append(para)
+    return "\n\n".join(kept)
+
+
+def _clean_fetched_markdown(markdown: str) -> str:
+    """三个抓取通道共用的最终 markdown 清洗管线，按顺序：已知区块截断 → 站点头部
+    导航剥离 → 跟踪像素引用清理 → 整段重复内容去重。"""
+    markdown = _strip_known_boilerplate(markdown)
+    markdown = _strip_openai_header_nav(markdown)
+    markdown = _strip_tracking_pixel_refs(markdown)
+    return _dedup_repeated_paragraphs(markdown)
 
 
 def _fetch_direct(url: str) -> str | None:
@@ -358,7 +414,7 @@ def _fetch_direct(url: str) -> str | None:
     )
     if not markdown:
         return markdown
-    return _strip_tracking_pixel_refs(_strip_known_boilerplate(markdown))
+    return _clean_fetched_markdown(markdown)
 
 
 def _fetch_via_jina(url: str) -> str | None:
@@ -372,7 +428,7 @@ def _fetch_via_jina(url: str) -> str | None:
     if idx == -1:
         return None
     body = response.text[idx + len(marker):].strip()
-    return _strip_tracking_pixel_refs(body) if body else None
+    return _clean_fetched_markdown(body) if body else None
 
 
 def _fetch_via_playwright(url: str) -> str | None:
@@ -400,7 +456,7 @@ def _fetch_via_playwright(url: str) -> str | None:
     markdown = trafilatura.extract(html, url=url, output_format="markdown", with_metadata=False, include_images=True)
     if not markdown:
         return markdown
-    return _strip_tracking_pixel_refs(_strip_known_boilerplate(markdown))
+    return _clean_fetched_markdown(markdown)
 
 
 def _build_placeholder_body(url: str) -> str:
@@ -443,12 +499,54 @@ def fetch_original_activity(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _strip_code_and_links(text: str) -> str:
+    """代码块/URL 不算翻译内容，不应计入 CJK 占比分母——本地图片自定义 scheme
+    （ainews-media://，含随机哈希文件名）之前漏了，短小的配图说明块会被这串哈希
+    拖累占比（诊断真实批次数据后发现）。"""
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    return re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    return re.sub(re.escape(IMAGE_URL_PREFIX) + r"\S+", "", text)
+
+
+# 判断一行是不是"数据行/图表提取噪声"（标识符+数字表格、图表转 Markdown 产生的字符画），
+# 而非需要翻译的自然语言正文。判据：这一行里找不到长度>=3 的连续拉丁字母、或长度>=2 的
+# 连续中日韩文字——真正的自然语言句子几乎不可能连一个这样的片段都没有（诊断真实批次数据后
+# 发现：Genebench-Pro 类数据表格行、Jina Reader 把图表转成的数字字符画都符合这个特征）。
+_WORD_LIKE_RE = re.compile(r"[A-Za-z]{3,}|[一-鿿]{2,}")
+
+
+def _is_data_or_noise_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return _WORD_LIKE_RE.search(stripped) is None
+
+
+def _strip_data_and_noise_lines(text: str) -> str:
+    kept = [line for line in text.split("\n") if not _is_data_or_noise_line(line)]
+    return "\n".join(kept)
+
+
+# 只有几乎整块都是噪声（≥95% 行）才跳过翻译——数据表格常见"表头(可翻译)+大量数据行"混合
+# 结构，阈值定太低会连表头一起漏翻，实际收益不大（表头对应的 CJK 占比稀释问题已经靠
+# _strip_data_and_noise_lines 在完整性校验里解决，不需要靠跳过翻译额外兜底）。
+_MOSTLY_NOISE_LINE_RATIO = 0.95
+
+
+def _is_mostly_noise(text: str) -> bool:
+    """整块内容几乎全是数据表格/图表提取噪声（如 Jina Reader 把图表转成的数字字符画），
+    没有实质可翻译的自然语言——跳过翻译调用，原样保留（04 §2.4 诊断实测发现：这类内容
+    不是翻译模型的问题，硬翻只会浪费 token、甚至让模型编造译文）。
+    """
+    lines = [line for line in text.split("\n") if line.strip()]
+    if not lines:
+        return False
+    noise_count = sum(1 for line in lines if _is_data_or_noise_line(line))
+    return noise_count / len(lines) >= _MOSTLY_NOISE_LINE_RATIO
 
 
 def _cjk_ratio_excluding_code(text: str) -> float:
     stripped = _strip_code_and_links(text)
+    stripped = _strip_data_and_noise_lines(stripped)
     total = len(re.sub(r"\s", "", stripped))
     if total == 0:
         return 0.0
@@ -459,6 +557,13 @@ def _has_untranslated_residue(text: str) -> bool:
     return any(p.search(text) for p in _UNTRANSLATED_RESIDUE_PATTERNS)
 
 
+def _matched_residue_pattern(text: str) -> str | None:
+    for p in _UNTRANSLATED_RESIDUE_PATTERNS:
+        if p.search(text):
+            return p.pattern
+    return None
+
+
 def _validate_translation_completeness(translated_body: str) -> bool:
     """04 §2.4 硬约束：翻译完成后机械检测非中文占比/HTML-LaTeX 残留，不能只凭主观判断。"""
     if _has_untranslated_residue(translated_body):
@@ -466,24 +571,82 @@ def _validate_translation_completeness(translated_body: str) -> bool:
     return _cjk_ratio_excluding_code(translated_body) >= _TRANSLATION_CJK_RATIO_THRESHOLD
 
 
-def _translate_chunk(chunk: str) -> str:
+# 单个分块译文 CJK 占比低于这个门槛，视为"模型几乎没翻译"（诊断真实批次数据确认：
+# 真正的翻译失败案例占比恒为 0.00-0.03，合法的数据密集内容排除噪声行后占比明显更高），
+# 带纠错提示重试一次。
+_CHUNK_RETRY_CJK_THRESHOLD = 0.10
+
+_TRANSLATE_SYSTEM_PROMPT = (
+    "你是专业的技术文章翻译助手。把下面这段 Markdown 正文翻译成中文："
+    "逐段对应，不合并、不总结、不评论；保留标题层级/代码块/公式/引用块等 Markdown 结构；"
+    "专有名词保留原文并在首次出现时用括号给出中文解释；保留数字精确度。"
+)
+
+_TRANSLATE_RETRY_SYSTEM_PROMPT = _TRANSLATE_SYSTEM_PROMPT + (
+    "\n注意：你上一次的输出几乎完全保留了英文原文，没有实际翻译。这次必须把所有自然语言正文"
+    "完整译成中文，只允许专有名词、代码块、公式、URL、纯数据/表格行保留原文。"
+)
+
+
+def _translate_chunk(chunk: str, *, retry: bool = False) -> str:
     result = call_structured(
         model=TRANSLATE_MODEL,
-        system_prompt=(
-            "你是专业的技术文章翻译助手。把下面这段 Markdown 正文翻译成中文："
-            "逐段对应，不合并、不总结、不评论；保留标题层级/代码块/公式/引用块等 Markdown 结构；"
-            "专有名词保留原文并在首次出现时用括号给出中文解释；保留数字精确度。"
-        ),
+        system_prompt=_TRANSLATE_RETRY_SYSTEM_PROMPT if retry else _TRANSLATE_SYSTEM_PROMPT,
         user_content=chunk,
         response_model=ChunkTranslation,
     )
     return result.translated_text
 
 
+_CHUNK_MAX_RETRIES = 2
+
+
+def _translate_chunk_with_retry(chunk: str) -> tuple[str, bool, int]:
+    """返回 (译文, 是否判定为噪声跳过翻译, 实际重试次数)。
+
+    最多重试两次（而非一次）：实测发现同一分块独立重跑结果会摆动（模型偶发漏译
+    开头一句话，换一次采样就正常了），多一次重试能吃掉大部分这类纯随机性失败，
+    而不需要放宽 CJK 占比阈值本身（放宽阈值会连真正的翻译缺失一起放过）。
+    """
+    if _is_mostly_noise(chunk):
+        return chunk, True, 0
+    translated = _translate_chunk(chunk)
+    retry_count = 0
+    while _cjk_ratio_excluding_code(translated) < _CHUNK_RETRY_CJK_THRESHOLD and retry_count < _CHUNK_MAX_RETRIES:
+        translated = _translate_chunk(chunk, retry=True)
+        retry_count += 1
+    return translated, False, retry_count
+
+
+def _review_translation_completeness(original_body: str, translated_body: str) -> bool:
+    """机械 CJK 占比校验未通过时的独立复审：不是让翻译模型自证"我翻完了"（04 §2.4
+    硬约束明确禁止的自估），而是另开一次调用，对照原文逐段核对译文是否完整——机械
+    校验继续作为主判据，这一步只用来减少专有名词/数据表格密度天然偏高导致的误杀。
+    """
+    result = call_structured(
+        model=TRANSLATE_MODEL,
+        system_prompt=(
+            "你是翻译质检员。下面会给你一篇英文原文和对应的中文译文，你的任务是对照原文逐段核对，"
+            "判断译文是否完整传达了原文的全部信息。译文里专有名词/品牌名/代码/公式/URL/数据表格行"
+            "保留英文或数字原样是正常的，不算翻译缺失；但如果大段自然语言正文被原样跳过没有翻译，"
+            "或明显遗漏了原文的实质内容，就判定为不完整。"
+        ),
+        user_content=f"【原文】\n{original_body}\n\n【译文】\n{translated_body}",
+        response_model=TranslationCompletenessReview,
+    )
+    return result.is_complete
+
+
 @activity.defn
 def translate_activity(title: str, body_md: str) -> dict:
     """标题单独翻译一次；正文按段落分块逐块翻译再拼接；拼接后做机械完整性校验，
     校验不过则走唯一允许的降级路径（保留首尾分块+中间占位说明，04 §2.4 硬约束）。
+
+    三处针对性处理（诊断真实批次数据后新增，见 decisions.md）：
+    - 疑似图表/数据噪声的分块跳过翻译调用；
+    - 单个分块译文 CJK 占比过低（几乎没翻译）时，带纠错提示最多重试两次；
+    - 机械校验（CJK 占比）未通过时，用独立复审判断是不是专有名词/数据密度导致的
+      误杀——机械校验仍是唯一的主判据，复审只是减少误杀，不改变"不能自估"的硬约束。
     """
     title_result = call_structured(
         model=TRANSLATE_MODEL,
@@ -493,23 +656,50 @@ def translate_activity(title: str, body_md: str) -> dict:
     )
 
     chunks = _chunk_paragraphs(body_md)
-    translated_chunks = [_translate_chunk(chunk) for chunk in chunks]
+    translated_chunks: list[str] = []
+    for i, chunk in enumerate(chunks):
+        translated, skipped_as_noise, retry_count = _translate_chunk_with_retry(chunk)
+        translated_chunks.append(translated)
+
+        # 诊断专用：逐块记录 CJK 占比/残留命中情况，用于精确定位整体校验失败的根因，
+        # 附带记录本块是否被跳过翻译/实际重试了几次，方便评估修复效果。
+        ratio = _cjk_ratio_excluding_code(translated)
+        residue = _matched_residue_pattern(translated)
+        if residue or ratio < _TRANSLATION_CJK_RATIO_THRESHOLD:
+            activity.logger.warning(
+                f"[chunk_diag] title={title[:40]!r} chunk={i}/{len(chunks)} "
+                f"cjk_ratio={ratio:.2f} residue={residue} chunk_len={len(translated)} "
+                f"skipped_as_noise={skipped_as_noise} retry_count={retry_count} "
+                f"preview={translated[:80]!r}"
+            )
+
     translated_body = "\n\n".join(translated_chunks)
 
     fallback_notice = None
     if not _validate_translation_completeness(translated_body):
-        if len(translated_chunks) > 2:
-            # 唯一允许的降级路径：保留首尾分块（近似摘要/引言 + 结论）完整翻译，
-            # 中间占位说明——绝不悄悄标记为翻译完成（04 §2.4 硬约束）。
-            translated_body = "\n\n".join(
-                [
-                    translated_chunks[0],
-                    "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）",
-                    translated_chunks[-1],
-                ]
+        has_residue = _has_untranslated_residue(translated_body)
+        reviewed_as_complete = False
+        if not has_residue:
+            # 复审只处理"CJK 占比不达标"这一种触发原因——HTML/LaTeX 残留基本不会
+            # 误判（诊断真实批次数据：93 条分块诊断 residue 命中率为 0），没必要复审。
+            reviewed_as_complete = _review_translation_completeness(body_md, translated_body)
+        if reviewed_as_complete:
+            activity.logger.warning(
+                f"translate_activity 机械校验未通过但复审判定翻译完整（专有名词/数据密度导致误判）：{title[:50]}"
             )
-        fallback_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
-        activity.logger.warning(f"translate_activity 完整性校验未通过：{title[:50]}")
+        else:
+            if len(translated_chunks) > 2:
+                # 唯一允许的降级路径：保留首尾分块（近似摘要/引言 + 结论）完整翻译，
+                # 中间占位说明——绝不悄悄标记为翻译完成（04 §2.4 硬约束）。
+                translated_body = "\n\n".join(
+                    [
+                        translated_chunks[0],
+                        "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）",
+                        translated_chunks[-1],
+                    ]
+                )
+            fallback_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
+            activity.logger.warning(f"translate_activity 完整性校验未通过：{title[:50]}")
 
     return {
         "translated_title": title_result.translated_title,

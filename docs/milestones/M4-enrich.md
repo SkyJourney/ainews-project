@@ -43,3 +43,21 @@
 
 - 这是"本次架构的核心重设计"（04 §2.4 原文用语），50+ 条批次测试没有跳过或缩小规模——168 篇真实文章、14 个真实源，直接对应旧系统的真实故障案例（28% 覆盖率故障），这次验证结果是 100%。
 - 边界约束反复检查过：Enrich 阶段的任何判断（gist/metadata）都只针对单篇文章本身，没有引入跨文章比较逻辑。
+
+## 追加深化：翻译降级问题深度排查（2026-07-05）
+
+M4 验收时翻译降级率是 9.5%（168 篇里 16 篇 `translation_fallback_notice` 非空），用户要求专门开一个阶段深挖，目标是"看能否让复杂文章翻译也做到无降级"。
+
+**排查方法**：给 `translate_activity` 加逐块诊断日志（`[chunk_diag]`：CJK 占比/残留命中/是否判定为噪声/重试次数），跑真实全源批次（146 篇，17 篇失败）拿到精确数据，逐案例核对原文/最终 gist，把 17 个失败归成 5 类根因（详见 `.claude/memory/decisions.md`）。
+
+**落地的修复**（`backend/worker/enrich.py`）：
+- `_is_data_or_noise_line`/`_is_mostly_noise`：识别"数据行/图表提取噪声"（判据：一行里有没有长度>=3 的连续拉丁字母或长度>=2 的连续中日韩文字），噪声块跳过翻译调用，数据行从 CJK 占比分母里排除
+- `_translate_chunk_with_retry`：单块译文 CJK 占比过低时带纠错提示重试，上限从 1 次加到 **2 次**（实测发现同一段原文独立重跑结果会因模型随机性摆动，多一次重试比放宽阈值更对症）
+- `_strip_openai_header_nav` + `_KNOWN_BOILERPLATE_RE` 扩展"Keep reading"：openai.com 文章页 Jina 通道的重复头部导航 + 相关文章推荐区块清理
+- `_dedup_repeated_paragraphs`：通用"重复段落去重"（响应式页面同一 DOM 元素被多套布局重复渲染），一次覆盖 a16z 侧栏与 arxiv 许可证图标块两类问题，不需要分别写站点专用正则
+- `_strip_code_and_links` 补漏：本地图片自定义 scheme（`ainews-media://`）之前没有被排除在 CJK 占比分母之外
+- `_review_translation_completeness`（`TranslationCompletenessReview` schema）：机械校验（CJK 占比）不通过且无 HTML/LaTeX 残留时，独立开一次 LLM 调用对照原文核对译文是否真的不完整，减少专有名词/数据密度导致的误杀——机械校验仍是唯一主判据，这一步只在校验已判定失败后触发，不是让翻译模型自证完成
+
+**明确不追的 2 类**：品牌名密度导致的临界失败（旧项目 `news-originalizer.md` 同样没有豁免逻辑）；`state-of-ai-report` 历史 Edition 落地页（`url_index` 显示这类页面摘要恒为空，跨日去重会在第二天自动丢弃，不是持续复发问题）。
+
+**验收**：全新全量批次（清空表、真实走完整 Temporal 流水线）：144 篇，0 enrich_failed，**0 篇最终降级**（原始诊断批次 17/146=11.6%）。复审机制用正负样本各测过一次确认不是橡皮图章；重试上限调整依据是同一原文独立重跑三次结果不一致，证明是模型随机性而非内容结构性问题。
