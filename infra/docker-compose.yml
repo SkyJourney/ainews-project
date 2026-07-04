@@ -1,0 +1,153 @@
+# ainews-service · 仓库内通用编排（可移植版）
+#
+# 这份文件是"开源仓库的通用逻辑"：只用具名 volume，不出现任何本机专属路径。
+# 任何人 clone 这个仓库到别的机器，`docker compose -f infra/docker-compose.yml up -d`
+# 都应该能直接跑起来做本地开发。
+#
+# 本机实际长期运行的那一份是独立维护在 /Volumes/Docker/compose/ainews-service/ 下的
+# 部署版（硬编码 /Volumes/Docker/data/ainews-service/ 持久化路径），两份不做符号链接，
+# 后续 compose 定义变了需要手动同步过去——仓库版负责"定义"，部署版负责"跑在这台机器上"。
+
+name: ainews-service
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ainews-service-db
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      POSTGRES_DB: ${POSTGRES_DB:-ainews_content}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      # 宿主机 5432 已被本机另一套编排占用，改用 15432；仅用于本地排查/联调直连，
+      # 应用本身在 compose 网络内一律走 db:5432。
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ainews}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ainews
+
+  redis:
+    image: redis:7-alpine
+    container_name: ainews-service-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主机 6379 同样已被占用，改用 16379。
+      - "${REDIS_PORT:-16379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ainews
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    container_name: ainews-service-temporal
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ainews}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_SEEDS: db
+    ports:
+      - "${TEMPORAL_GRPC_PORT:-7233}:7233"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ainews
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: ainews-service-temporal-ui
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:${TEMPORAL_UI_PORT:-8088}
+    ports:
+      - "${TEMPORAL_UI_PORT:-8088}:8080"
+    depends_on:
+      - temporal
+    networks:
+      - ainews
+
+  # temporal-worker / celery-worker / celery-beat 三个服务共用同一个 backend 镜像
+  # （只有 command 不同）。build 只在 temporal-worker 声明一次；`docker compose build`
+  # 或 `up --build` 跑一次即可打出 ainews-service/backend:<tag> 这个带版本的镜像，
+  # 另外两个服务直接复用，不必各自重复声明 build。
+  temporal-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: ainews-service/backend:${BACKEND_IMAGE_TAG:-0.1.0}
+    container_name: ainews-service-temporal-worker
+    restart: unless-stopped
+    command: python -m worker.worker
+    environment:
+      TZ: Asia/Shanghai
+      TEMPORAL_HOST: temporal:7233
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ainews}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ainews_content}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+    depends_on:
+      temporal:
+        condition: service_started
+      db:
+        condition: service_healthy
+    networks:
+      - ainews
+
+  celery-worker:
+    image: ainews-service/backend:${BACKEND_IMAGE_TAG:-0.1.0}
+    container_name: ainews-service-celery-worker
+    restart: unless-stopped
+    command: celery -A beat.celery_app worker -l info
+    environment:
+      TZ: Asia/Shanghai
+      TEMPORAL_HOST: temporal:7233
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal-worker:
+        condition: service_started
+    networks:
+      - ainews
+
+  celery-beat:
+    image: ainews-service/backend:${BACKEND_IMAGE_TAG:-0.1.0}
+    container_name: ainews-service-celery-beat
+    restart: unless-stopped
+    command: celery -A beat.celery_app beat -l info
+    environment:
+      TZ: Asia/Shanghai
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ainews
+
+networks:
+  ainews:
+    name: ainews-service
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:

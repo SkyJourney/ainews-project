@@ -1,0 +1,21 @@
+# M0 骨架所需依赖。Docker 镜像构建（backend/Dockerfile）与本机 conda 环境
+# （见 .conda_env 的 install_cmd）共用这一份，不要分叉维护两份依赖清单。
+#
+# 版本探查方式：在 ainews-service conda 环境里不加版本号直接 pip install 全部包，
+# 让 pip 的依赖解析器算出一套互相兼容的最新组合，`pip check` 验证无冲突后原样锁定
+# 在这里（精确 pin，不用范围）——2026-07-04 探查，之后升级同样走"先解析再锁定"流程，
+# 不要手改单个版本号猜兼容性。
+
+temporalio==1.30.0
+celery==5.6.3
+redis==8.0.1
+sqlalchemy==2.0.51
+alembic==1.18.5
+psycopg[binary]==3.3.4
+python-dotenv==1.2.2
+httpx==0.28.1
+
+# ── LLM 调用（自建 LiteLLM 网关是 OpenAI 兼容协议，直接用 openai SDK 指向它）──
+openai==2.44.0
+instructor==1.15.4
+pydantic==2.13.4

@@ -43,3 +43,5 @@
 | 日期 | 里程碑 | 事件 |
 |---|---|---|
 | 2026-07-04 | - | 完成 00-04 架构调研与 roadmap；创建 `docs/milestones/` 全部 10 份里程碑框架文档 + 索引；初始化项目级 `CLAUDE.md`；新建本文档 |
+| 2026-07-04 | M0 | backend 骨架落地（conda_env+requirements.txt / Dockerfile / Alembic 迁移 / Temporal worker / Celery beat），两份 docker-compose.yml（仓库通用版 `infra/` + 本机部署版 `/Volumes/Docker/compose/ainews-service/`，项目在本机命名为 `ainews-service` 以区分旧系统的 `ainews`）。六容器（db/redis/temporal/temporal-ui/temporal-worker/celery-worker/celery-beat）已实际起服务并持续运行，Alembic 建表验证通过，手动触发 hello-world workflow 验证 Temporal Web UI 执行历史 + Postgres 写入均正常。唯一未完成项：LiteLLM 网关连通性测试，待真实 endpoint/key 填入 `/Volumes/Docker/compose/ainews-service/.env` 后补跑，不阻塞后续里程碑。 |
+| 2026-07-04 | M0 | 补充 LLM 客户端依赖（`openai`+`instructor`+`pydantic`，此前 requirements.txt 遗漏，M0 的 LiteLLM 连通性测试其实卡在缺客户端库这一步）；实际创建本机 `ainews-service` conda 环境，用 pip 解析器探查全部依赖的兼容最新版本并精确 pin（不再用范围），`pip check` 验证无冲突；backend 镜像重建、六容器重启验证仍正常。 |

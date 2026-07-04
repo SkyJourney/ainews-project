@@ -1,0 +1,20 @@
+# ainews-service 后端专用 Python 执行环境（沿用 AInews 项目同款约定）
+# 本机开发时所有 backend/ 下脚本一律走本环境，不依赖裸 `python3`
+# ——PATH 解析在不同执行环境下会漂移到系统 3.9.6 或 Miniconda base，版本不受控。
+
+env_name: ainews-service
+python_version: 3.13.12
+python_bin: ~/miniconda3/envs/ainews-service/bin/python3
+
+# 创建
+create_cmd: conda create -n ainews-service python=3.13.12 -y
+
+# 安装依赖（本机直跑 alembic / 本地调试 worker 时用；Docker 镜像内不依赖 conda，
+# Dockerfile 直接在系统 Python 里 pip install -r requirements.txt）
+install_cmd: ~/miniconda3/envs/ainews-service/bin/pip install -r requirements.txt
+
+# 验证环境存在且版本正确
+verify_cmd: ~/miniconda3/envs/ainews-service/bin/python3 --version
+
+# 约定：本机直接调用（不经 Docker）时，脚本/命令行一律写绝对路径
+# ~/miniconda3/envs/ainews-service/bin/python3，不要写裸 `python3`。

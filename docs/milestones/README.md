@@ -23,7 +23,7 @@ flowchart LR
 
 | 里程碑 | 文件 | 一句话目标 | 状态 |
 |---|---|---|---|
-| M0 | [M0-skeleton.md](./M0-skeleton.md) | 项目骨架跑通：Postgres/Temporal/Celery/LiteLLM 四件套连通 | 未开始 |
+| M0 | [M0-skeleton.md](./M0-skeleton.md) | 项目骨架跑通：Postgres/Temporal/Celery/LiteLLM 四件套连通 | 进行中（LiteLLM 待验证） |
 | M1 | [M1-single-source-e2e.md](./M1-single-source-e2e.md) | 单源（openai-rss）端到端最小管道跑通 | 未开始 |
 | M2 | [M2-filter-dedup.md](./M2-filter-dedup.md) | 过滤/去重规则完整化 | 未开始 |
 | M3 | [M3-all-sources.md](./M3-all-sources.md) | 全部 14 个信息源接入 | 未开始 |

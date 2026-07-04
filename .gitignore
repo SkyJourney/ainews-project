@@ -1,0 +1,18 @@
+# 环境变量与密钥（真实值只放本机 .env，不入库）
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Node / Astro（frontend 到 M6 才实际填充）
+node_modules/
+dist/
+.astro/
+
+# macOS
+.DS_Store
