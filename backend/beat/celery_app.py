@@ -12,12 +12,11 @@ app = Celery("ainews_beat", broker=REDIS_URL, backend=REDIS_URL)
 app.conf.timezone = "Asia/Shanghai"
 
 app.conf.beat_schedule = {
-    # M0 占位排期：每 5 分钟触发一次 hello-world workflow，只为验证
-    # Beat → Worker → Temporal.start_workflow 这条链路是通的。
-    # 真实的抓取排期（对应 14 个信息源的调度节奏）从 M1/M3 开始设计，届时替换本条。
-    "trigger-hello-workflow": {
-        "task": "beat.tasks.trigger_hello_workflow",
-        "schedule": crontab(minute="*/5"),
+    # M1：单源（openai-rss）每日跑一次，对应 03-architecture-proposal.md 的排期设计。
+    # M3 全源接入后按需拆分成多条排期或在 workflow 内部对活跃源做 fan-out。
+    "trigger-ainews-pipeline": {
+        "task": "beat.tasks.trigger_ainews_pipeline",
+        "schedule": crontab(hour=9, minute=0),
     },
 }
 

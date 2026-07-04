@@ -19,3 +19,11 @@ httpx==0.28.1
 openai==2.44.0
 instructor==1.15.4
 pydantic==2.13.4
+
+# ── M1：Fetch（rss）+ Enrich（原文抽取）依赖 ──
+# feedparser：RSS/Atom 解析；trafilatura：HTML 正文抽取 + 直出 markdown（含 include_images，M4 配图分级渲染复用同一套）
+feedparser==6.0.12
+trafilatura==2.1.0
+
+# ── 配置数据加载：sources.yaml / models.yaml 都是 YAML，M1 起才有代码真正解析它们 ──
+pyyaml==6.0.3

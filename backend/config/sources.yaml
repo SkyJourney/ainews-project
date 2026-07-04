@@ -1,0 +1,21 @@
+# 信息源注册表（配置数据，非代码）。字段定义见 docs/04-roadmap.md §2.1。
+# M1 只录入 openai-rss 一条真实记录，验证单源端到端管道；其余 13 个源留给 M3。
+#
+# 字段说明：
+#   name          kebab-case 唯一标识
+#   tier          1/2/3，见 04 §2.1 分级逻辑
+#   perspective   research / product / investor
+#   fetch_method  rss / api / webfetch / script（M1 只实现 rss 分支）
+#   reliability   alive / degraded / dead
+#   last_verified 最近一次人工核实这个源仍然有效的日期（ISO 8601），
+#                 preflight_activity 用它判断是否超过 30 天需要告警
+#   url           fetch_method=rss 时的 feed 地址
+
+sources:
+  - name: openai-rss
+    tier: 1
+    perspective: research
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://openai.com/news/rss.xml"

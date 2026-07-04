@@ -7,27 +7,25 @@
 ```mermaid
 flowchart LR
     M0[M0 骨架跑通] --> M1[M1 单源端到端]
-    M1 --> M2[M2 过滤/去重规则完整化]
-    M2 --> M3[M3 全信息源接入]
-    M3 --> M4[M4 Enrich 完整化]
-    M4 --> M5[M5 Aggregate 完整化]
+    M1 --> M234["M2+M3+M4 合并阶段"]
+    M234 --> M5[M5 Aggregate 完整化]
     M5 --> M6[M6 前端上线]
     M6 --> M7[M7 生产化收尾]
     M7 -.延后.-> M8[M8 旧数据迁移]
     M7 -.延后.-> M9["M9 向量化/RAG（可选延伸）"]
 ```
 
-每个里程碑独立可验收，前一个不达标不进入下一个；但允许小范围并行——M6 前端改造可以在 M4/M5 收尾阶段就先动手，因为它依赖的是 `documents` 表 schema 而非 Enrich/Aggregate 的完整业务规则。
+M1 独立验收；**M2-M4 从"逐个里程碑独立验收"调整为合并成一个连续推进阶段**（调整理由见 `.claude/memory/decisions.md`「M1 单独验收，M2-M4 合并成一个连续阶段推进」与 `04-roadmap.md` §3）。M5 起恢复独立验收；允许小范围并行——M6 前端改造可以在 M4/M5 收尾阶段就先动手，因为它依赖的是 `documents` 表 schema 而非 Enrich/Aggregate 的完整业务规则。
 
 ## 文件列表
 
 | 里程碑 | 文件 | 一句话目标 | 状态 |
 |---|---|---|---|
 | M0 | [M0-skeleton.md](./M0-skeleton.md) | 项目骨架跑通：Postgres/Temporal/Celery/LiteLLM 四件套连通 | 已完成 |
-| M1 | [M1-single-source-e2e.md](./M1-single-source-e2e.md) | 单源（openai-rss）端到端最小管道跑通 | 未开始 |
-| M2 | [M2-filter-dedup.md](./M2-filter-dedup.md) | 过滤/去重规则完整化 | 未开始 |
-| M3 | [M3-all-sources.md](./M3-all-sources.md) | 全部 14 个信息源接入 | 未开始 |
-| M4 | [M4-enrich.md](./M4-enrich.md) | Enrich 阶段完整化（原文归档能力） | 未开始 |
+| M1 | [M1-single-source-e2e.md](./M1-single-source-e2e.md) | 单源（openai-rss）端到端最小管道跑通 | **已完成**（2026-07-04） |
+| M2 | [M2-filter-dedup.md](./M2-filter-dedup.md) | 过滤/去重规则完整化 | 未开始（与 M3/M4 合并推进） |
+| M3 | [M3-all-sources.md](./M3-all-sources.md) | 全部 14 个信息源接入 | 未开始（与 M2/M4 合并推进） |
+| M4 | [M4-enrich.md](./M4-enrich.md) | Enrich 阶段完整化（原文归档能力） | 未开始（与 M2/M3 合并推进） |
 | M5 | [M5-aggregate.md](./M5-aggregate.md) | Aggregate 阶段完整化（聚类 + 写作规则） | 未开始 |
 | M6 | [M6-frontend.md](./M6-frontend.md) | 前端上线（Astro SSR 接入 Postgres） | 未开始 |
 | M7 | [M7-production-hardening.md](./M7-production-hardening.md) | 生产化收尾，可独立连续运行 | 未开始 |
