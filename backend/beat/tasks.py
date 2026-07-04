@@ -20,9 +20,6 @@ from worker.workflows import AInewsPipelineWorkflow
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "ainews-task-queue"
 
-# M1 单源：只有 openai-rss；M3 全源接入后改成按 sources.yaml 遍历活跃源触发。
-SOURCE_NAME = "openai-rss"
-
 
 @shared_task(name="beat.tasks.trigger_ainews_pipeline")
 def trigger_ainews_pipeline() -> str:
@@ -34,7 +31,7 @@ async def _start_workflow() -> str:
     client = await Client.connect(TEMPORAL_HOST, data_converter=pydantic_data_converter)
     handle = await client.start_workflow(
         AInewsPipelineWorkflow.run,
-        PipelineParams(source_name=SOURCE_NAME, batch_id=batch_id),
+        PipelineParams(batch_id=batch_id),
         id=f"ainews-pipeline-{batch_id}",
         task_queue=TASK_QUEUE,
     )

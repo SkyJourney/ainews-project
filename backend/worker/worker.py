@@ -15,8 +15,19 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from worker.aggregate import aggregate_activity
-from worker.enrich import fetch_original_activity, gist_activity, translate_activity, upsert_article_activity
-from worker.fetch import fetch_activity, preflight_activity
+from worker.enrich import (
+    fetch_original_activity,
+    gist_activity,
+    metadata_activity,
+    translate_activity,
+    upsert_article_activity,
+)
+from worker.fetch import (
+    fetch_activity,
+    list_active_sources_activity,
+    preflight_activity,
+    record_source_health_activity,
+)
 from worker.filter import filter_activity
 from worker.workflows import AInewsPipelineWorkflow, EnrichArticleWorkflow
 from worker.write import write_activity
@@ -35,10 +46,13 @@ async def main() -> None:
         activities=[
             preflight_activity,
             fetch_activity,
+            list_active_sources_activity,
+            record_source_health_activity,
             filter_activity,
             fetch_original_activity,
             translate_activity,
             gist_activity,
+            metadata_activity,
             upsert_article_activity,
             aggregate_activity,
             write_activity,

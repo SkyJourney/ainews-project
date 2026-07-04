@@ -104,6 +104,11 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ainews}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ainews_content}
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      # M4 配图分级渲染下载目录（04 §2.4）：Postgres 不适合存大量二进制图片，落本机卷，
+      # M6 前端需要挂载同一个卷只读，把 IMAGE_URL_PREFIX 对应的路径配成静态资源服务。
+      IMAGE_STORAGE_DIR: /app/media
+    volumes:
+      - images:/app/media
     depends_on:
       temporal:
         condition: service_started
@@ -151,3 +156,4 @@ networks:
 volumes:
   pgdata:
   redisdata:
+  images:

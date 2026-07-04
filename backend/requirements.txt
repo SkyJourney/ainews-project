@@ -27,3 +27,16 @@ trafilatura==2.1.0
 
 # ── 配置数据加载：sources.yaml / models.yaml 都是 YAML，M1 起才有代码真正解析它们 ──
 pyyaml==6.0.3
+
+# ── M3：webfetch/script 抓取方式的日期解析（此前是 temporalio 等包的间接依赖，
+# 现在 fetch.py 直接 import 用它解析相对/绝对日期，改成显式声明）──
+python-dateutil==2.9.0.post0
+
+# ── M3：解析 arXiv API 返回的 XML（外部抓来的内容，标准库 xml.etree 有 XXE/billion-laughs
+# 风险，用 defusedxml 替代）──
+defusedxml==0.7.1
+
+# ── M4：原文抓取状态③ Fallback A——direct+Jina 都失败后用无头浏览器渲染兜底
+# （能过 JS 挑战/部分 Cloudflare 反爬，direct/Jina 都是纯 HTTP 客户端做不到这点）。
+# backend/Dockerfile 需要额外 `playwright install --with-deps chromium` 装浏览器二进制。
+playwright==1.61.0

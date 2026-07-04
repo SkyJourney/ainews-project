@@ -1,17 +1,20 @@
 # 信息源注册表（配置数据，非代码）。字段定义见 docs/04-roadmap.md §2.1。
-# M1 只录入 openai-rss 一条真实记录，验证单源端到端管道；其余 13 个源留给 M3。
+# M3 全部 14 条已录入并逐条用真实 HTTP 请求核实过有效（2026-07-04）。
 #
 # 字段说明：
 #   name          kebab-case 唯一标识
 #   tier          1/2/3，见 04 §2.1 分级逻辑
 #   perspective   research / product / investor
-#   fetch_method  rss / api / webfetch / script（M1 只实现 rss 分支）
+#   fetch_method  rss / api / webfetch / script
 #   reliability   alive / degraded / dead
 #   last_verified 最近一次人工核实这个源仍然有效的日期（ISO 8601），
 #                 preflight_activity 用它判断是否超过 30 天需要告警
-#   url           fetch_method=rss 时的 feed 地址
+#   url           抓取入口地址（rss=feed 地址；api=API 端点；webfetch=列表页地址；
+#                 script=对应脚本抓取的入口地址，脚本内部逻辑见 backend/worker/fetch.py）
+#   bias          可选，仅少数源标注（如 a16z 的 VC 视角）
 
 sources:
+  # ── T1：一手发布源 + 学术权威源 ──
   - name: openai-rss
     tier: 1
     perspective: research
@@ -19,3 +22,110 @@ sources:
     reliability: alive
     last_verified: "2026-07-04"
     url: "https://openai.com/news/rss.xml"
+
+  - name: deepmind-rss
+    tier: 1
+    perspective: research
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://deepmind.google/blog/rss.xml"
+
+  - name: arxiv-api
+    tier: 1
+    perspective: research
+    fetch_method: api
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://export.arxiv.org/api/query"
+
+  - name: huggingface-daily-papers
+    tier: 1
+    perspective: research
+    fetch_method: api
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://huggingface.co/api/daily_papers"
+
+  # ── T2：聚合分析层 ──
+  - name: import-ai
+    tier: 2
+    perspective: research
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://importai.substack.com/feed"
+
+  - name: interconnects
+    tier: 2
+    perspective: research
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://www.interconnects.ai/feed"
+
+  - name: qbitai
+    tier: 2
+    perspective: product
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://www.qbitai.com/feed"
+
+  - name: air-street-press
+    tier: 2
+    perspective: investor
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://press.airstreet.com/feed"
+
+  # ── T3：降级兜底源 ──
+  - name: anthropic-news
+    tier: 3
+    perspective: research
+    fetch_method: webfetch
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://www.anthropic.com/news"
+
+  - name: meta-ai-blog
+    tier: 3
+    perspective: research
+    fetch_method: webfetch
+    reliability: degraded
+    last_verified: "2026-07-04"
+    url: "https://ai.meta.com/blog/"
+
+  - name: the-batch
+    tier: 3
+    perspective: research
+    fetch_method: webfetch
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://www.deeplearning.ai/the-batch"
+
+  - name: jiqizhixin
+    tier: 3
+    perspective: product
+    fetch_method: script
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://plink.anyfeeder.com/weixin/almosthuman2014"
+
+  - name: a16z-news-content
+    tier: 3
+    perspective: investor
+    fetch_method: script
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://a16z.com/news-content/"
+    bias: "VC"
+
+  - name: state-of-ai
+    tier: 3
+    perspective: investor
+    fetch_method: webfetch
+    reliability: alive
+    last_verified: "2026-07-04"
+    url: "https://www.stateof.ai/"

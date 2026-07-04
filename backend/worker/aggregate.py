@@ -42,11 +42,19 @@ def _generate_doc_id(slug: str, used_in_batch: set[str]) -> str:
     raise RuntimeError(f"zettel ID 冲突顺延超过 {MAX_ID_COLLISION_RETRIES} 次：slug={slug}")
 
 
-def _fallback_notice(fetch_channel: str) -> str | None:
-    """04 §2.6 fallback_notice 三态：null=正常，字符串=降级原因。"""
-    if fetch_channel == "jina":
-        return "主抓取通道失败（反爬拦截/超时等），使用 Jina Reader 兜底获取原文"
-    return None
+_FETCH_CHANNEL_NOTICES = {
+    "jina": "主抓取通道失败（反爬拦截/超时等），使用 Jina Reader 兜底获取原文",
+    "playwright": "direct 与 Jina 均失败，使用无头浏览器渲染兜底获取原文",
+    "placeholder": "全部抓取通道失败（direct/Jina/Playwright），仅占位记录，正文缺失",
+}
+
+
+def _build_fallback_notice(fetch_channel: str, translation_fallback_notice: str | None) -> str | None:
+    """04 §2.6 fallback_notice 三态：null=正常，字符串=降级原因；抓取降级与翻译降级是
+    两个独立信号，都存在时合并成一条说明。
+    """
+    notices = [n for n in (_FETCH_CHANNEL_NOTICES.get(fetch_channel), translation_fallback_notice) if n]
+    return "；".join(notices) if notices else None
 
 
 @activity.defn
@@ -73,7 +81,12 @@ def aggregate_activity(batch_id: str) -> list[dict]:
                     "source_url": article["url"],
                     "gist": article["gist"],
                     "topic": PLACEHOLDER_TOPIC,
-                    "fallback_notice": _fallback_notice(article["fetch_channel"]),
+                    "entities": article.get("entities") or [],
+                    "content_type": article.get("content_type"),
+                    "word_count": article.get("word_count"),
+                    "fallback_notice": _build_fallback_notice(
+                        article["fetch_channel"], article.get("translation_fallback_notice")
+                    ),
                 },
                 "body_md": body_md,
                 "content_hash": hashlib.sha256(body_md.encode("utf-8")).hexdigest(),

@@ -11,12 +11,19 @@ with workflow.unsafe.imports_passed_through():
     from worker.enrich import (
         fetch_original_activity,
         gist_activity,
+        metadata_activity,
         needs_translation,
         translate_activity,
         upsert_article_activity,
     )
+    from worker.enrich import compute_word_count
     from worker.enrich import content_hash as compute_content_hash
-    from worker.fetch import fetch_activity, preflight_activity
+    from worker.fetch import (
+        fetch_activity,
+        list_active_sources_activity,
+        preflight_activity,
+        record_source_health_activity,
+    )
     from worker.filter import filter_activity
     from worker.schemas import EnrichArticleParams, PipelineParams
     from worker.write import write_activity
@@ -33,8 +40,8 @@ class EnrichArticleWorkflow:
         fetch_result = await workflow.execute_activity(
             fetch_original_activity,
             params.entry.url,
-            # direct 最长 30s + jina 兜底最长 45s，留够余量
-            start_to_close_timeout=timedelta(seconds=90),
+            # direct(30s，含配图下载) + jina(45s) + playwright(30s) 三级兜底顺序尝试，留够余量
+            start_to_close_timeout=timedelta(seconds=150),
             retry_policy=default_retry,
         )
         body_md = fetch_result["body_md"]
@@ -42,6 +49,7 @@ class EnrichArticleWorkflow:
 
         translated_title: str | None = None
         translated_body: str | None = None
+        translation_fallback_notice: str | None = None
         translation_needed = needs_translation(params.entry.title, body_md)
 
         if translation_needed:
@@ -53,10 +61,21 @@ class EnrichArticleWorkflow:
             )
             translated_title = translation["translated_title"]
             translated_body = translation["translated_body_md"]
+            translation_fallback_notice = translation["translation_fallback_notice"]
+
+        final_title = translated_title or params.entry.title
+        final_body = translated_body or body_md
 
         gist = await workflow.execute_activity(
             gist_activity,
-            args=[translated_title or params.entry.title, translated_body or body_md],
+            args=[final_title, final_body],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=default_retry,
+        )
+
+        metadata = await workflow.execute_activity(
+            metadata_activity,
+            args=[final_title, final_body],
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=default_retry,
         )
@@ -65,7 +84,7 @@ class EnrichArticleWorkflow:
             upsert_article_activity,
             {
                 "url": params.entry.url,
-                "source_name": params.source_name,
+                "source_name": params.entry.source_name,
                 "batch_id": params.batch_id,
                 "fetched_title": params.entry.title,
                 "fetched_summary": params.entry.raw_summary,
@@ -77,6 +96,11 @@ class EnrichArticleWorkflow:
                 "content_hash": compute_content_hash(body_md),
                 "fetch_channel": fetch_channel,
                 "published_at": params.entry.published,
+                "entities": metadata["entities"],
+                "content_type": metadata["content_type"],
+                "novelty_signal": {"keywords": metadata["novelty_keywords"]},
+                "word_count": compute_word_count(final_body),
+                "translation_fallback_notice": translation_fallback_notice,
             },
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=default_retry,
@@ -85,32 +109,40 @@ class EnrichArticleWorkflow:
 
 @workflow.defn
 class AInewsPipelineWorkflow:
-    """M1 单源端到端管道：preflight → fetch → filter → enrich×M（child workflow fan-out）
-    → aggregate → write。source_name/batch_id 由 Celery Beat 触发时生成并传入（04 §2.8）。
+    """全信息源端到端管道：preflight+fetch×N（活跃源 fan-out）→ filter（合并后批量）→
+    enrich×M（child workflow fan-out）→ aggregate → write。batch_id 由 Celery Beat
+    触发时生成并传入（04 §2.8）；活跃源列表从 sources.yaml 读取（03 doc 既定架构）。
     """
 
     @workflow.run
     async def run(self, params: PipelineParams) -> dict:
         default_retry = RetryPolicy(maximum_attempts=3)
 
-        await workflow.execute_activity(
-            preflight_activity,
-            params.source_name,
+        active_sources = await workflow.execute_activity(
+            list_active_sources_activity,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=default_retry,
         )
 
-        entries = await workflow.execute_activity(
-            fetch_activity,
-            params.source_name,
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=default_retry,
+        # 按源 fan-out：某个源耗尽重试仍失败不影响其余源，只记录健康状态后继续
+        # （04 §2.1：连续失败先标 degraded，仍参与后续批次，不是直接拉黑整条流水线）。
+        fetch_results = await asyncio.gather(
+            *(self._fetch_one_source(name, default_retry) for name in active_sources),
+            return_exceptions=True,
         )
+        entries = []
+        source_failures = 0
+        for name, result in zip(active_sources, fetch_results):
+            if isinstance(result, BaseException):
+                workflow.logger.warning(f"源 {name} fetch 失败（不影响其余源）: {result}")
+                source_failures += 1
+            else:
+                entries.extend(result)
 
         kept = await workflow.execute_activity(
             filter_activity,
-            entries,
-            start_to_close_timeout=timedelta(seconds=30),
+            args=[entries, params.batch_id],
+            start_to_close_timeout=timedelta(seconds=60),
             retry_policy=default_retry,
         )
 
@@ -120,7 +152,7 @@ class AInewsPipelineWorkflow:
             *(
                 workflow.execute_child_workflow(
                     EnrichArticleWorkflow.run,
-                    EnrichArticleParams(entry=entry, source_name=params.source_name, batch_id=params.batch_id),
+                    EnrichArticleParams(entry=entry, batch_id=params.batch_id),
                     id=f"{params.batch_id}-enrich-{i}",
                 )
                 for i, entry in enumerate(kept)
@@ -147,8 +179,42 @@ class AInewsPipelineWorkflow:
 
         return {
             "batch_id": params.batch_id,
+            "sources_attempted": len(active_sources),
+            "sources_failed": source_failures,
             "fetched": len(entries),
             "kept": len(kept),
             "enrich_failed": len(enrich_failures),
             "written": written,
         }
+
+    @staticmethod
+    async def _fetch_one_source(source_name: str, retry_policy: RetryPolicy) -> list:
+        """单个源的 preflight+fetch+健康状态记录，供 fan-out 并发调用。"""
+        await workflow.execute_activity(
+            preflight_activity,
+            source_name,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=retry_policy,
+        )
+        try:
+            entries = await workflow.execute_activity(
+                fetch_activity,
+                source_name,
+                # webfetch 分支含一次 LLM 抽取调用，script 分支的 a16z 有 N 次详情页串行请求，
+                # 留够余量。
+                start_to_close_timeout=timedelta(seconds=180),
+                retry_policy=retry_policy,
+            )
+        except Exception as exc:
+            await workflow.execute_activity(
+                record_source_health_activity,
+                args=[source_name, False, str(exc)],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            raise
+        await workflow.execute_activity(
+            record_source_health_activity,
+            args=[source_name, True, None],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        return entries

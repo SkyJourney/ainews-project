@@ -12,10 +12,16 @@ from pydantic import BaseModel, Field
 
 
 class Entry(BaseModel):
-    """fetch_activity 的统一输出（04 §2.2），未来 api/webfetch/script 分支复用同一结构。"""
+    """fetch_activity 的统一输出（04 §2.2），未来 api/webfetch/script 分支复用同一结构。
+
+    source_name 从 M2 起补上（filter_activity 的跨源同论文去重需要按源过滤条目，
+    M3 起 filter_activity 会同时处理多个源合并后的条目，仅凭 batch 级别的单一
+    source_name 已经不够用）。
+    """
 
     title: str
     url: str
+    source_name: str
     published: date | None = Field(default=None, description="发布日期，无法解析时为 None")
     raw_summary: str = ""
     low_confidence: bool = False
@@ -23,7 +29,7 @@ class Entry(BaseModel):
 
 
 class SourceConfig(BaseModel):
-    """sources.yaml 里一条信息源记录（04 §2.1）。M1 只用到 rss 分支必需的字段。"""
+    """sources.yaml 里一条信息源记录（04 §2.1）。"""
 
     name: str
     tier: int
@@ -32,22 +38,42 @@ class SourceConfig(BaseModel):
     reliability: str
     last_verified: date
     url: str | None = None
+    bias: str | None = None
 
 
 class PipelineParams(BaseModel):
-    """AInewsPipelineWorkflow 的入参：source_name + batch_id 由 Celery Beat 触发时生成
-    （batch_id 依赖真实时钟，workflow 内部不允许自己生成，必须外部传入）。
+    """AInewsPipelineWorkflow 的入参：batch_id 由 Celery Beat 触发时生成
+    （依赖真实时钟，workflow 内部不允许自己生成，必须外部传入）。
+
+    M3 起不再带 source_name——一次 pipeline 运行会对 sources.yaml 里全部活跃源做
+    fetch fan-out（03 doc 的既定架构：fetch_activity × N，N=活跃源数），不是针对单一源。
     """
 
-    source_name: str
     batch_id: str
 
 
+class ListingEntry(BaseModel):
+    """webfetch 抓取方式的列表页单条抽取结果（04 §2.2）。"""
+
+    title: str = Field(description="文章标题")
+    url: str = Field(description="文章链接，可以是相对路径，后续会自动补全为绝对路径")
+    published_raw: str = Field(default="", description="原始发布日期文本，找不到就给空字符串，不要编造")
+
+
+class PageListing(BaseModel):
+    """webfetch 列表页整体抽取结果：一个 tool schema 里含多条目，与其余单字段 schema 不同。"""
+
+    entries: list[ListingEntry] = Field(description="列表页里全部真实文章条目，忽略导航/页脚/广告噪声")
+
+
 class EnrichArticleParams(BaseModel):
-    """EnrichArticleWorkflow 的入参：单篇文章 + 所属批次信息。"""
+    """EnrichArticleWorkflow 的入参：单篇文章 + 所属批次信息。
+
+    source_name 从 entry.source_name 取，不再单独作为一个字段——一旦 M3 起
+    一个 batch 同时处理多个源，两处字段值会不一致，只保留 Entry 上那份权威值。
+    """
 
     entry: Entry
-    source_name: str
     batch_id: str
 
 
@@ -72,6 +98,20 @@ class ChunkTranslation(BaseModel):
 
 
 class ArticleGist(BaseModel):
-    """一段话摘要 tool schema（M1 元数据抽取最简版，实体/内容类型/新颖度信号留 M4）。"""
+    """一段话摘要 tool schema。"""
 
     gist: str = Field(description="用一段中文话概括这篇文章讲了什么，供聚合/展示阶段使用")
+
+
+class ArticleMetadata(BaseModel):
+    """富元数据抽取 tool schema（04 §2.4）：只判断"这篇文章本身是什么"，不做跨文章判断。"""
+
+    entities: list[str] = Field(description="文章中出现的关键实体列表（公司名/模型名/产品名/人名等专有名词）")
+    content_type: str = Field(
+        description="内容类型分类，选最贴切的一个：research_paper / product_announcement / "
+        "opinion / tutorial / policy / industry_news / other"
+    )
+    novelty_keywords: list[str] = Field(
+        description="辅助新颖度判断的关键词或短语（如'首次提出'、'突破性'、'渐进式改进'），"
+        "只描述这篇文章本身呈现的信号，不要判断是否与其他文章重复"
+    )
