@@ -215,9 +215,9 @@ M1 独立验收，前一个不达标不进入下一个；**M2-M4 从路线图调
 **落地**：定时触发实际改用 Temporal 原生 Schedule（不是立项时计划的 Celery Beat），核实 Redis 全代码库唯一用途就是 Celery broker 后，`celery-worker`/`celery-beat`/`redis` 三个容器整体退役，详见 §2.8 与 `.claude/memory/decisions.md`。
 **验收标准**：新系统能独立连续运行至少 7 天不需要人工干预（2026-07-05 起观察期，开发工作已完成）；此时可以考虑退役旧 AInews 的 Desktop Scheduled Task。
 
-### M8 — 历史数据迁移（明确延后）
-**触发条件**：仅当 M7 验收标准达成后才启动，不影响 M0-M7 的推进节奏，也不在本轮 roadmap 里展开具体导入方案。
-**范围（到时候再细化）**：把旧 AInews vault 的历史 Markdown 内容一次性导入 Postgres 作为种子数据。
+### M8 — 历史数据迁移
+**设计已定稿（2026-07-05，提前于原定"M7 验收后"启动，仅分析设计，未执行）**：把旧 AInews vault（341 个内容文档，`50-Zettel`/`20-Topics`/`10-Daily`/`30-Digests`/`60-Originals`）里新系统没有覆盖到的历史内容导入 Postgres。核实新旧系统时间窗口存在真实重叠（不是简单接续），总体策略是 Original/Zettel/Topic/Digest 冲突时新系统数据为准，只补新系统没有的内容；**Daily 例外**——旧系统按天拆分的粒度本身就是要保留补齐的目标。详见 [`docs/milestones/M8-legacy-migration.md`](./milestones/M8-legacy-migration.md)。
+**实际导入执行**留到 M7 观察期结束后再做，避免迁移本身的负载与观察期验证目标冲突。
 
 ### M9 — 向量化 / RAG 扩展（可选延伸，同样延后）
 见 [03-architecture-proposal.md §8](./03-architecture-proposal.md#8-未来扩展向量化--自建-rag)。不新增数据库，复用同一 Postgres 实例的 `pgvector` 扩展；embedding 模型选型待独立调研。
