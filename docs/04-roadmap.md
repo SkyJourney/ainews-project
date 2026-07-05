@@ -211,8 +211,9 @@ M1 独立验收，前一个不达标不进入下一个；**M2-M4 从路线图调
 **验收标准**：浏览器访问可见 M1-M5 产出的真实内容；**验证"无需重建"这一核心卖点**——手动往 `documents` 表插一条测试记录，刷新页面立即可见，全程不碰 Astro 容器（不重新构建、不重启）。
 
 ### M7 — 生产化收尾
-**范围**：Postgres 备份策略落地；Celery Beat 对接真实定时任务（替代旧系统对 Desktop Scheduled Task + "保持电脑唤醒"的依赖）；按需决定是否接入 Langfuse / `git_export`。
-**验收标准**：新系统能独立连续运行至少 7 天不需要人工干预；此时可以考虑退役旧 AInews 的 Desktop Scheduled Task。
+**范围**：Postgres 备份策略落地；定时触发对接真实定时任务（替代旧系统对 Desktop Scheduled Task + "保持电脑唤醒"的依赖）；按需决定是否接入 Langfuse / `git_export`。
+**落地**：定时触发实际改用 Temporal 原生 Schedule（不是立项时计划的 Celery Beat），核实 Redis 全代码库唯一用途就是 Celery broker 后，`celery-worker`/`celery-beat`/`redis` 三个容器整体退役，详见 §2.8 与 `.claude/memory/decisions.md`。
+**验收标准**：新系统能独立连续运行至少 7 天不需要人工干预（2026-07-05 起观察期，开发工作已完成）；此时可以考虑退役旧 AInews 的 Desktop Scheduled Task。
 
 ### M8 — 历史数据迁移（明确延后）
 **触发条件**：仅当 M7 验收标准达成后才启动，不影响 M0-M7 的推进节奏，也不在本轮 roadmap 里展开具体导入方案。
@@ -220,6 +221,11 @@ M1 独立验收，前一个不达标不进入下一个；**M2-M4 从路线图调
 
 ### M9 — 向量化 / RAG 扩展（可选延伸，同样延后）
 见 [03-architecture-proposal.md §8](./03-architecture-proposal.md#8-未来扩展向量化--自建-rag)。不新增数据库，复用同一 Postgres 实例的 `pgvector` 扩展；embedding 模型选型待独立调研。
+
+### M10 — Deep Dive：跨天聚合深度解读（延后，旧系统从未实现）
+**背景**：旧系统设计过"Deep Dive"（`40-Deep-Dives/`）——对 Digest 层做跨天/跨周二次聚合，识别跨日延续主题/热门 topic 趋势线。**核实这个功能在旧系统里从未真正实现过**（目录自建库以来只有空 `.gitkeep`，无对应 agent，前端是"筹备中"空态），不是"已验证规则待迁移"，是净新设计。
+**触发条件**：新系统 `documents` 表 `doc_type='digest'` 积累足够天数历史后才启动（沿用旧系统"≥7 天"门槛作参考起点；核实时点 2026-07-05 新系统只有 1 天 Digest 历史）。
+**范围（到时候再细化）**：详见 [`docs/milestones/M10-deep-dive.md`](./milestones/M10-deep-dive.md)。
 
 ---
 
