@@ -15,6 +15,7 @@ import '@fontsource/inter/600.css'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 import { ClientRouter } from 'astro:transitions'
+import NavProgressBar from '../components/shell/NavProgressBar.astro'
 import LuminaHeader from '../components/shell/LuminaHeader.astro'
 import LuminaDock from '../components/shell/LuminaDock.tsx'
 
@@ -68,6 +69,7 @@ const siteUrl = new URL(Astro.url.pathname, Astro.site ?? 'http://localhost:4321
     <ClientRouter />
   </head>
   <body>
+    <NavProgressBar />
     <LuminaHeader />
     <main class="lumina-main">
       <slot />
@@ -77,6 +79,7 @@ const siteUrl = new URL(Astro.url.pathname, Astro.site ?? 'http://localhost:4321
     <script>
       import '../lib/wikilink-preview-client.ts'
       import '../lib/theme-toggle-client.ts'
+      import '../lib/nav-progress-client.ts'
     </script>
 
     <style>
