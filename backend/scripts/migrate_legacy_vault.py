@@ -25,12 +25,13 @@ import argparse
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
 from worker.aggregate import _content_hash, _humanize_slug
+from worker.enrich import compute_word_count
 from worker.db import (
     aggregate_get_document,
     document_id_exists,
@@ -113,16 +114,38 @@ def original_doc_id(url: str) -> str:
     return f"original-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]}"
 
 
+def _parse_legacy_date(value: object) -> date:
+    """统一处理旧 vault YAML 解析出的日期值：裸值解析成 date/datetime，加了引号的
+    值解析成 str（isinstance(x, date) 会漏判），三种情况都要正确落到 date；解析不出
+    才兜底成 date.today()。此前 plan_originals/plan_zettels 各自用了一套不完整的判断，
+    加引号的字符串会静默漏判成今天（见 .claude/memory/known_issues.md）。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            pass
+    return date.today()
+
+
 def strip_leading_title_block(body: str) -> str:
     """去掉旧 vault Daily/Digest/Original 正文开头的 `# {title}`（+ Original/Digest 紧跟的
-    来源说明 blockquote）——新系统 title 是独立字段，不在 body_md 里重复拼一遍（M6 踩过这个坑）。
+    来源说明 blockquote，往往是连续两行 `> 原文：...` / `> 抓取：...：N 字`）——新系统 title
+    是独立字段，不在 body_md 里重复拼一遍（M6 踩过这个坑）。
+
+    `bq` 的匹配必须带 re.MULTILINE：不带的话 `^` 只认字符串开头一次，`(?:^> ...)+` 循环在
+    吃掉第一行 blockquote 后就无法再匹配第二行，导致"抓取时间/字数"这行元数据残留在正文
+    最前面（M8 迁移的真实数据里发现过，见 .claude/memory/known_issues.md）。
     """
     body = body.lstrip("\n")
     m = re.match(r"^# .+?\n", body)
     if not m:
         return body
     rest = body[m.end():].lstrip("\n")
-    bq = re.match(r"(?:^> .*\n?)+", rest)
+    bq = re.match(r"(?:^> .*\n?)+", rest, re.MULTILINE)
     if bq:
         rest = rest[bq.end():]
     return rest.lstrip("\n")
@@ -187,14 +210,18 @@ def plan_originals(plan: MigrationPlan) -> None:
                 "doc_type": "original",
                 "source_name": fm.get("source_name"),
                 "source_url": url,
+                # 权威 schema（aggregate.py._build_original_record）没有这个 key——是
+                # 有意保留的额外信息（翻译前的原始英文标题），不是要跟权威 schema 严格
+                # 对齐；前端/其余代码不读它，纯归档用途，不会因为多这个字段出问题。
                 "original_title": fm.get("original_title"),
                 "topic_slug": None,  # 旧 vault 的 related_topics 恒为空数组，没有可迁移的真实值
+                "gist": extract_gist(body),  # 旧 vault 没有对应字段，机械截断兜底（04 §2.4 硬约束）
+                "word_count": compute_word_count(body),
                 "fallback_notice": fm.get("fallback_notice"),
                 "related_zettel_id": None,  # 由 plan_zettels 回填（如果对应 zettel 也被导入）
                 "migrated_from_legacy_vault": True,
             }
-            published_at = fm.get("published_at")
-            doc_date_val = published_at if isinstance(published_at, date) else date.today()
+            doc_date_val = _parse_legacy_date(fm.get("published_at"))
             plan.docs.append(
                 PlannedDoc(
                     doc_id=new_id,
@@ -246,8 +273,7 @@ def plan_zettels(plan: MigrationPlan) -> None:
                 "rationale": "旧系统历史内容迁移（M8）",
                 "migrated_from_legacy_vault": True,
             }
-            created = fm.get("created")
-            doc_date_val = created.date() if hasattr(created, "date") else date.today()
+            doc_date_val = _parse_legacy_date(fm.get("created"))
             plan.docs.append(
                 PlannedDoc(
                     doc_id=zettel_id,
@@ -289,6 +315,16 @@ def split_topic_sections(body: str) -> dict[str, str]:
     return {d: "\n".join(lines).strip("\n") for d, lines in sections.items()}
 
 
+_TOPIC_ENTRY_LINE_RE = re.compile(r"^- ", re.M)
+
+
+def _count_topic_entries(body_md: str) -> int:
+    """article_count 必须是"实际条目数"，不是"日期区块数"——直接数正文里的条目行，
+    不依赖任何历史累加基线，可重复调用（此前 += len(missing) 把待补的日期区块数当成
+    篇数累加，见 .claude/memory/known_issues.md）。"""
+    return len(_TOPIC_ENTRY_LINE_RE.findall(body_md))
+
+
 def plan_topics(plan: MigrationPlan) -> None:
     for path in sorted((VAULT_ROOT / "20-Topics").glob("*.md")):
         slug = path.stem
@@ -307,7 +343,7 @@ def plan_topics(plan: MigrationPlan) -> None:
                     "topic_slug": slug,
                     "created_date": min(sections) if sections else date.today().isoformat(),
                     "last_updated_date": max(sections) if sections else date.today().isoformat(),
-                    "article_count": fm.get("entry_total", 0),
+                    "article_count": _count_topic_entries(body_md),
                     "migrated_from_legacy_vault": True,
                 }
                 doc_date_val = date.fromisoformat(max(sections)) if sections else date.today()
@@ -320,7 +356,7 @@ def plan_topics(plan: MigrationPlan) -> None:
                 body_md = existing["body_md"].rstrip("\n") + "\n\n" + "\n".join(backfill_blocks)
                 title = existing["frontmatter"].get("title", _humanize_slug(slug))
                 frontmatter = dict(existing["frontmatter"])
-                frontmatter["article_count"] = frontmatter.get("article_count", 0) + len(missing)
+                frontmatter["article_count"] = _count_topic_entries(body_md)
                 frontmatter["migrated_from_legacy_vault"] = True
                 doc_date_val = existing["doc_date"]
 
@@ -354,16 +390,24 @@ def plan_daily(plan: MigrationPlan) -> None:
             fm, body = parse_frontmatter(path)
             body = strip_leading_title_block(body)
             title = f"{doc_id} AI 日报"
+            topics = fm.get("topics") or []
+            previous_daily = fm.get("previous_daily")
             frontmatter = {
                 "title": title,
                 "doc_type": "daily",
                 "stats": {
-                    "entry_count": fm.get("entry_count"),
+                    # 键名对齐权威 schema（aggregate.py _compute_daily_stats），前端只认
+                    # articles_processed，旧键名 entry_count 会让页面显示"0 条"。
+                    # new_topics_created/zettel_created/zettel_reused 旧系统没有等价数据，
+                    # 不虚构（04"简化优于捏造"原则）；sources_alive/sources_dead 是真实
+                    # legacy 数据，作为额外信息保留。
+                    "articles_processed": fm.get("entry_count"),
+                    "topics_touched": len(topics),
                     "sources_alive": fm.get("sources_alive"),
                     "sources_dead": fm.get("sources_dead"),
                 },
-                "topics": fm.get("topics") or [],
-                "previous_daily": fm.get("previous_daily"),
+                "topics": topics,
+                "previous_daily": previous_daily.isoformat() if isinstance(previous_daily, date) else previous_daily,
                 "migrated_from_legacy_vault": True,
             }
             plan.docs.append(

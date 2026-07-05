@@ -109,7 +109,11 @@ def _cjk_ratio(text: str) -> float:
 
 
 def needs_translation(title: str, body_md: str) -> bool:
-    """纯函数，workflow 里直接调用来决定是否要跑 translate_activity（04 §2.4 语言判断）。"""
+    """[Temporal 回放安全] workflows.py 的 EnrichArticleWorkflow 直接调用这个函数（不经过
+    activity），用来决定是否要跑 translate_activity（04 §2.4 语言判断）——workflow 代码在
+    replay 时会重新执行一遍，这类被直接调用的函数必须是确定性纯函数，不能引入网络请求/
+    当前时间/随机数等副作用，否则会静默破坏回放确定性（见 .claude/memory/known_issues.md，
+    同类标记见 content_hash/compute_word_count）。"""
     already_chinese = _cjk_ratio(title) > 0 or _cjk_ratio(body_md[:_LANGUAGE_SAMPLE_CHARS]) > _CJK_RATIO_THRESHOLD
     return not already_chinese
 
@@ -394,8 +398,9 @@ def _clean_fetched_markdown(markdown: str) -> str:
 
 def _fetch_direct(url: str) -> str | None:
     """状态①：direct 通道，唯一会处理配图的通道。命中 Jina 触发条件（含重定向跳到
-    不安全地址，按 SSRF 拦截处理）时返回 None 交给调用方走兜底；其余异常（如真实的
-    404）原样抛出，不掩盖真实错误。
+    不安全地址，按 SSRF 拦截处理）时返回 None 交给调用方走兜底；其余 HTTP 错误（如真实
+    的 404）原样抛出——由调用方 fetch_original_activity 统一捕获并降级到下一通道，
+    这里不吞掉，方便日志里看到具体是哪种错误。
     """
     try:
         response = _safe_get(url, headers={"User-Agent": USER_AGENT}, timeout=30.0)
@@ -464,6 +469,13 @@ def _build_placeholder_body(url: str) -> str:
     return f"（全部抓取通道均失败，无法获取原文正文，请通过原文链接查阅：{url}）"
 
 
+_FETCH_CHANNELS = (
+    (_fetch_direct, "direct"),
+    (_fetch_via_jina, "jina"),
+    (_fetch_via_playwright, "playwright"),
+)
+
+
 @activity.defn
 def fetch_original_activity(url: str) -> dict:
     """状态①→②→③依次兜底，全部失败则走 Fallback B 占位（04 §2.4，不再抛异常——
@@ -471,6 +483,11 @@ def fetch_original_activity(url: str) -> dict:
 
     入口 URL 来自外部信息源内容，先做 SSRF 校验；命中就直接占位，不浪费任何通道去碰
     这个地址（Jina/Playwright 都可能被当成打内网的跳板）。
+
+    真实的 404/超时/限流这类 HTTP 错误在新闻聚合场景下很常见，此前 _fetch_direct/
+    _fetch_via_jina 遇到这类错误会直接抛出、穿透整个 activity 导致文章从批次消失——
+    这里统一捕获，当作"这个通道失败"处理并继续尝试下一通道，而不是让异常中断整个
+    降级链条。
     """
     try:
         _assert_public_url(url)
@@ -478,17 +495,14 @@ def fetch_original_activity(url: str) -> dict:
         activity.logger.warning(f"拒绝抓取不安全的 URL，直接写占位正文：{exc}")
         return {"body_md": _build_placeholder_body(url), "fetch_channel": "placeholder"}
 
-    body_md = _fetch_direct(url)
-    if body_md:
-        return {"body_md": body_md, "fetch_channel": "direct"}
-
-    body_md = _fetch_via_jina(url)
-    if body_md:
-        return {"body_md": body_md, "fetch_channel": "jina"}
-
-    body_md = _fetch_via_playwright(url)
-    if body_md:
-        return {"body_md": body_md, "fetch_channel": "playwright"}
+    for fetch_fn, channel in _FETCH_CHANNELS:
+        try:
+            body_md = fetch_fn(url)
+        except httpx.HTTPError as exc:
+            activity.logger.warning(f"{channel} 通道抓取失败（{exc!r}），尝试下一通道：{url}")
+            continue
+        if body_md:
+            return {"body_md": body_md, "fetch_channel": channel}
 
     activity.logger.warning(f"direct/jina/playwright 全部抓取通道失败，写入占位正文：{url}")
     return {"body_md": _build_placeholder_body(url), "fetch_channel": "placeholder"}
@@ -742,9 +756,11 @@ def metadata_activity(title: str, body_md: str) -> dict:
 
 
 def _compute_word_count(body_md: str) -> int:
-    """机械计算正文字数（04 §2.4 硬约束：不能靠 LLM 自估，旧系统偏差最高达 20-30 倍）。"""
-    without_code = re.sub(r"```.*?```", "", body_md, flags=re.DOTALL)
-    return len(re.sub(r"\s", "", without_code))
+    """机械计算正文字数（04 §2.4 硬约束：不能靠 LLM 自估，旧系统偏差最高达 20-30 倍）。
+    口径与 _strip_code_and_links 一致：代码块/URL/本地图片引用不算正文字数。
+    """
+    stripped = _strip_code_and_links(body_md)
+    return len(re.sub(r"\s", "", stripped))
 
 
 @activity.defn
@@ -753,8 +769,10 @@ def upsert_article_activity(payload: dict) -> None:
 
 
 def content_hash(body_md: str) -> str:
+    """[Temporal 回放安全] 同 needs_translation：workflows.py 直接调用，必须保持纯函数。"""
     return hashlib.sha256(body_md.encode("utf-8")).hexdigest()
 
 
 def compute_word_count(body_md: str) -> int:
+    """[Temporal 回放安全] 同 needs_translation：workflows.py 直接调用，必须保持纯函数。"""
     return _compute_word_count(body_md)
