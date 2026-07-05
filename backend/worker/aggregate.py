@@ -50,6 +50,44 @@ TOPIC_BUCKETS = (
 )
 PLACEHOLDER_TOPIC = "uncategorized"
 
+# Daily 正文里"按主题"小标题的 emoji + 中文名固定映射表（04 §2.5）。旧系统这块是每次
+# LLM 现生成的，实测同一个 slug 在不同天出现过三种不同 emoji（如 infra-hardware 出现过
+# ⚡/🖥️/🔧），不是刻意设计、只是从未固定过——这里改成固定表，不随批次自估飘移。
+# 覆盖 TOPIC_BUCKETS + PLACEHOLDER_TOPIC 全部预设桶；未命中的 slug（历史遗留桶）用
+# _humanize_slug 兜底，不报错。
+TOPIC_EMOJI = {
+    "model-releases": "🚀",
+    "safety-alignment": "🛡️",
+    "opensource-tools": "🛠️",
+    "research-papers": "📄",
+    "policy-regulation": "⚖️",
+    "industry-moves": "🏢",
+    "funding-investment": "💰",
+    "infra-hardware": "🖥️",
+    "applications": "🎯",
+    "agents": "🤖",
+    "uncategorized": "📌",
+}
+TOPIC_LABEL = {
+    "model-releases": "模型发布",
+    "safety-alignment": "安全对齐",
+    "opensource-tools": "开源工具",
+    "research-papers": "研究论文",
+    "policy-regulation": "政策监管",
+    "industry-moves": "产业动态",
+    "funding-investment": "融资投资",
+    "infra-hardware": "基础设施",
+    "applications": "应用案例",
+    "agents": "Agent",
+    "uncategorized": "其他",
+}
+
+
+def _topic_heading(slug: str) -> str:
+    emoji = TOPIC_EMOJI.get(slug, "📌")
+    label = TOPIC_LABEL.get(slug, _humanize_slug(slug))
+    return f"## {emoji} {label} [[{slug}]]"
+
 # 分桶粒度规则（04 §2.5）：新 topic 本批次条数 < 3 视为"新领域涌现"证据不足，并入 uncategorized；
 # 单个 topic 本批次 > 8 条只记录建议拆分子类，不自动拆分（自动拆分需要模型二次判断合理的子类
 # 命名，一次性做到位风险较高，先记录留给后续人工/下一批次决定）。
@@ -469,7 +507,7 @@ def _build_daily_record(
         groups.setdefault(ctx["topic_slug"], []).append(_render_daily_entry_line(article, ctx))
 
     topic_sections = "\n\n".join(
-        f"## {_humanize_slug(slug)}\n\n" + "\n".join(groups[slug]) for slug in sorted(groups)
+        f"{_topic_heading(slug)}\n\n" + "\n".join(groups[slug]) for slug in sorted(groups)
     )
 
     stats = _compute_daily_stats(articles, decisions, per_article_ctx)
@@ -483,7 +521,10 @@ def _build_daily_record(
         + stats_section + "\n"
     )
 
+    # 主题小标题现在带 [[slug]] wikilink（见 _topic_heading），一并计入 link_targets，
+    # 这样 Topic 详情页的反链才能看到"被哪些 Daily 引用过"。
     link_targets = [ctx["zettel_id"] or ctx["original_id"] for ctx in per_article_ctx.values()]
+    link_targets.extend(sorted(groups))
     if yesterday:
         link_targets.append(yesterday["id"])
 

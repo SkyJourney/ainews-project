@@ -8,16 +8,20 @@ import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
 import { fetchDocumentsByTag } from '../../lib/db'
 import { docHref, DOC_TYPE_LABEL, type DocType } from '../../lib/doc-type'
 
+// 标签页不在导航 6 个列表页范围内，暂不接入滑动懒加载；用较大的单页上限
+// 先解决"分页查询不含 body_md"这一半（性能），交互仍是一次性渲染。
+const TAG_PAGE_SIZE = 60
+
 const { tag } = Astro.params
-const docs = await fetchDocumentsByTag(decodeURIComponent(tag!))
+const { rows: docs, total } = await fetchDocumentsByTag(decodeURIComponent(tag!), { limit: TAG_PAGE_SIZE, offset: 0 })
 
 if (docs.length === 0) {
   return new Response(null, { status: 404, statusText: 'Not Found' })
 }
 ---
 
-<BaseLayout title={`#${tag} · 标签`} description={`AInews 标签 #${tag} 下的全部内容，共 ${docs.length} 条`}>
-  <HeroSection eyebrow={`标签 · ${docs.length} 条`} title={`#${tag}`} subtitle="按日期倒序" />
+<BaseLayout title={`#${tag} · 标签`} description={`AInews 标签 #${tag} 下的全部内容，共 ${total} 条`}>
+  <HeroSection eyebrow={`标签 · ${total} 条`} title={`#${tag}`} subtitle="按日期倒序" />
 
   <div class="tag-doc-list">
     {docs.map((d) => (

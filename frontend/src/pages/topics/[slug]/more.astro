@@ -1,0 +1,40 @@
+---
+// AInews · Topic 详情页懒加载片段端点：按日期区块返回下一批渲染好的 HTML
+// 区块按整块切分（不会像 Daily 的按月分组那样出现"同一个区块被分页切断"的情况），
+// 用共享脚本的 flat 模式即可，不需要 grouped 合并逻辑
+export const prerender = false
+
+import { fetchDocumentById } from '../../../lib/db'
+import { renderMarkdownToHtml } from '../../../lib/markdown-render'
+import { splitTopicSections } from '../../../lib/topic-sections'
+import { TOPIC_DETAIL_SECTIONS_PER_BATCH } from '../../../lib/pagination'
+
+const { slug } = Astro.params
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+
+const row = await fetchDocumentById(slug!)
+if (!row || row.doc_type !== 'topic') {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+
+const sections = splitTopicSections(row.body_md)
+const start = (page - 1) * TOPIC_DETAIL_SECTIONS_PER_BATCH
+const batch = sections.slice(start, start + TOPIC_DETAIL_SECTIONS_PER_BATCH)
+const hasMore = start + batch.length < sections.length
+
+const html =
+  batch.length > 0
+    ? await renderMarkdownToHtml(
+        batch.map((s) => s.markdown).join('\n\n'),
+        `${row.content_hash}:${start}:${start + batch.length}`,
+      )
+    : ''
+
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  <div set:html={html} />
+</div>

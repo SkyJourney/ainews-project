@@ -1,0 +1,105 @@
+---
+// AInews · Originals(Sources) 列表卡片，从 originals/index.astro 抽出
+// 首屏 SSR 与 originals/more.astro 懒加载片段共用同一份组件，避免维护两套卡片模板
+import AIBadge from './AIBadge.astro'
+
+interface Props {
+  id: string
+  title: string | null
+  docDate: string | null
+  wordCount: number | null
+  sourceName: string | null
+}
+const { id, title, docDate, wordCount, sourceName } = Astro.props
+const source = sourceName ?? ''
+---
+
+<a href={`/originals/${id}/`} class="orig-card">
+  <div class="orig-card-header">
+    <span class="orig-card-source">
+      <span class="orig-card-source-avatar">
+        {source.charAt(0).toUpperCase()}
+      </span>
+      {source}
+    </span>
+    <AIBadge variant="translation" />
+  </div>
+  <h3 class="orig-card-title">{title}</h3>
+  <div class="orig-card-meta">
+    <span>{docDate ?? ''}</span>
+    <span class="orig-card-dot"></span>
+    <span>{(wordCount ?? 0).toLocaleString()} 字</span>
+  </div>
+</a>
+
+<style>
+  .orig-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    padding: 1.5rem;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    text-decoration: none;
+    color: var(--color-dark);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .orig-card:hover {
+    box-shadow: var(--shadow-card-hover);
+    transform: translateY(-2px);
+  }
+  .orig-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .orig-card-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    color: var(--color-darkgray);
+  }
+  .orig-card-source-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+    color: var(--color-light);
+    border-radius: 50%;
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .orig-card-title {
+    font-family: var(--font-header);
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0;
+    color: var(--color-dark);
+  }
+  .orig-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: auto;
+    font-family: var(--font-header);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: var(--color-gray);
+    text-transform: uppercase;
+  }
+  .orig-card-dot {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--color-lightgray);
+  }
+</style>

@@ -1,0 +1,27 @@
+---
+// AInews · Topics 滑动懒加载片段端点
+export const prerender = false
+
+import TopicCard from '../../components/cards/TopicCard.astro'
+import { fetchDocumentSummariesByType } from '../../lib/db'
+import { TOPICS_PAGE_SIZE } from '../../lib/pagination'
+
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+const offset = (page - 1) * TOPICS_PAGE_SIZE
+
+const { rows, total } = await fetchDocumentSummariesByType('topic', { limit: TOPICS_PAGE_SIZE, offset })
+const hasMore = offset + rows.length < total
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  {rows.map((row) => (
+    <TopicCard
+      slug={row.id}
+      articleCount={(row.frontmatter.article_count as number | null) ?? null}
+      lastUpdatedDate={row.doc_date}
+    />
+  ))}
+</div>

@@ -3,6 +3,12 @@
 
 import pg from 'pg'
 
+// Postgres DATE 类型（oid 1082）node-postgres 默认解析成 JS Date 对象，页面直接插值
+// 会触发 Date.prototype.toString()（"Sat Jul 04 2026 00:00:00 GMT+0800..."）。覆盖成
+// 原样返回 Postgres 文本协议给出的 "yyyy-MM-dd" 字符串，不做任何转换——这样
+// DocumentRow.doc_date 的 `string | null` 类型标注才是真的，不用在每个消费点各自格式化。
+pg.types.setTypeParser(1082, (value: string) => value)
+
 let pool: pg.Pool | undefined
 
 function getPool(): pg.Pool {
@@ -40,6 +46,94 @@ export async function fetchDocumentsByType(docType: string): Promise<DocumentRow
 export async function fetchDocumentById(id: string): Promise<DocumentRow | null> {
   const { rows } = await getPool().query<DocumentRow>(`SELECT ${DOCUMENT_COLUMNS} FROM documents WHERE id = $1`, [id])
   return rows[0] ?? null
+}
+
+// ---------------------------------------------------------------------------
+// 列表页轻量查询：不含 body_md，不经过 postgres-loader.ts 的 toLiveEntry
+// （全文 markdown 渲染 + 逐条查 backlinks/tags 的 N+1，只有详情页需要）。
+// ---------------------------------------------------------------------------
+
+export interface DocumentSummaryRow {
+  id: string
+  doc_type: string
+  title: string | null
+  doc_date: string | null
+  frontmatter: Record<string, unknown>
+  updated_at: string
+}
+
+const SUMMARY_COLUMNS = 'id, doc_type, title, doc_date, frontmatter, updated_at'
+
+export interface PaginatedResult<T> {
+  rows: T[]
+  total: number
+}
+
+/** 列表页首屏 + 懒加载"更多"共用同一个查询：LIMIT/OFFSET 分页，total 用于 hasMore 判断。 */
+export async function fetchDocumentSummariesByType(
+  docType: string,
+  { limit, offset }: { limit: number; offset: number },
+): Promise<PaginatedResult<DocumentSummaryRow>> {
+  const pool = getPool()
+  const [{ rows }, countResult] = await Promise.all([
+    pool.query<DocumentSummaryRow>(
+      `SELECT ${SUMMARY_COLUMNS} FROM documents WHERE doc_type = $1
+       ORDER BY doc_date DESC NULLS LAST, updated_at DESC
+       LIMIT $2 OFFSET $3`,
+      [docType, limit, offset],
+    ),
+    pool.query<{ count: number }>('SELECT count(*)::int AS count FROM documents WHERE doc_type = $1', [docType]),
+  ])
+  return { rows, total: countResult.rows[0]?.count ?? 0 }
+}
+
+/** Zettel 列表卡片要显示反链数量（不需要具体谁引用），批量查一次避免逐条 N+1。 */
+export async function fetchBacklinkCounts(ids: string[]): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  const { rows } = await getPool().query<{ to_id: string; count: number }>(
+    'SELECT to_id, count(*)::int AS count FROM links WHERE to_id = ANY($1) GROUP BY to_id',
+    [ids],
+  )
+  return new Map(rows.map((r) => [r.to_id, r.count]))
+}
+
+/** 列表页 eyebrow 统计用：某个 doc_type 的总数，跟当前分页无关，随时反映全表真实值。 */
+export async function fetchDocTypeCount(docType: string): Promise<number> {
+  const { rows } = await getPool().query<{ count: number }>(
+    'SELECT count(*)::int AS count FROM documents WHERE doc_type = $1',
+    [docType],
+  )
+  return rows[0]?.count ?? 0
+}
+
+/** 列表页 eyebrow 统计用：某个 doc_type 里 frontmatter 某个字段的去重值数量
+ * （如 Originals 的 source_name、Zettel 的 topic_slug）。 */
+export async function fetchDistinctFrontmatterFieldCount(docType: string, field: string): Promise<number> {
+  const { rows } = await getPool().query<{ count: number }>(
+    `SELECT count(DISTINCT frontmatter->>$2)::int AS count FROM documents WHERE doc_type = $1`,
+    [docType, field],
+  )
+  return rows[0]?.count ?? 0
+}
+
+/** Topics 列表页 eyebrow 用："更新至 xxx"，doc_date 在 aggregate.py 里每次更新都会
+ * 跟着刷新，直接取全表最大值即可，不需要额外解析 frontmatter。 */
+export async function fetchMaxDocDate(docType: string): Promise<string | null> {
+  const { rows } = await getPool().query<{ max: string | null }>(
+    'SELECT max(doc_date) AS max FROM documents WHERE doc_type = $1',
+    [docType],
+  )
+  return rows[0]?.max ?? null
+}
+
+/** Daily 专用：frontmatter.topics 是数组字段，去重需要先展开再计数。 */
+export async function fetchDailyDistinctTopicsCount(): Promise<number> {
+  const { rows } = await getPool().query<{ count: number }>(
+    `SELECT count(DISTINCT t)::int AS count
+     FROM documents, jsonb_array_elements_text(frontmatter->'topics') AS t
+     WHERE doc_type = 'daily'`,
+  )
+  return rows[0]?.count ?? 0
 }
 
 export interface WikilinkTarget {
@@ -102,16 +196,24 @@ export interface TaggedDocSummary {
   doc_date: string | null
 }
 
-/** /tags/{tag}/ 详情页用：命中该标签的全部文档（按日期倒序）。 */
-export async function fetchDocumentsByTag(tag: string): Promise<TaggedDocSummary[]> {
-  const { rows } = await getPool().query<TaggedDocSummary>(
-    `SELECT d.id, d.doc_type, d.title, d.doc_date FROM tags t
-     JOIN documents d ON d.id = t.doc_id
-     WHERE t.tag = $1
-     ORDER BY d.doc_date DESC NULLS LAST`,
-    [tag],
-  )
-  return rows
+/** /tags/{tag}/ 详情页用：命中该标签的文档（按日期倒序），LIMIT/OFFSET 分页。 */
+export async function fetchDocumentsByTag(
+  tag: string,
+  { limit, offset }: { limit: number; offset: number },
+): Promise<PaginatedResult<TaggedDocSummary>> {
+  const pool = getPool()
+  const [{ rows }, countResult] = await Promise.all([
+    pool.query<TaggedDocSummary>(
+      `SELECT d.id, d.doc_type, d.title, d.doc_date FROM tags t
+       JOIN documents d ON d.id = t.doc_id
+       WHERE t.tag = $1
+       ORDER BY d.doc_date DESC NULLS LAST
+       LIMIT $2 OFFSET $3`,
+      [tag, limit, offset],
+    ),
+    pool.query<{ count: number }>('SELECT count(*)::int AS count FROM tags WHERE tag = $1', [tag]),
+  ])
+  return { rows, total: countResult.rows[0]?.count ?? 0 }
 }
 
 export interface SearchResultRow {

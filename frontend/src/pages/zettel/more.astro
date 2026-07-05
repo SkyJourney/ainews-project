@@ -1,0 +1,31 @@
+---
+// AInews · Zettel 滑动懒加载片段端点：只返回卡片 HTML，不含 layout/head
+export const prerender = false
+
+import ZettelCard from '../../components/cards/ZettelCard.astro'
+import { fetchDocumentSummariesByType, fetchBacklinkCounts } from '../../lib/db'
+import { ZETTEL_PAGE_SIZE } from '../../lib/pagination'
+
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+const offset = (page - 1) * ZETTEL_PAGE_SIZE
+
+const { rows, total } = await fetchDocumentSummariesByType('zettel', { limit: ZETTEL_PAGE_SIZE, offset })
+const backlinkCounts = await fetchBacklinkCounts(rows.map((r) => r.id))
+const hasMore = offset + rows.length < total
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  {rows.map((row) => (
+    <ZettelCard
+      id={row.id}
+      title={row.title}
+      gist={(row.frontmatter.gist as string | null) ?? null}
+      topicSlug={(row.frontmatter.topic_slug as string | null) ?? null}
+      docDate={row.doc_date}
+      backlinkCount={backlinkCounts.get(row.id) ?? 0}
+    />
+  ))}
+</div>

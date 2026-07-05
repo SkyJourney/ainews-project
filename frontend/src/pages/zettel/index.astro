@@ -1,31 +1,22 @@
 ---
 // AInews · Zettel 列表 · 2-col masonry（用 CSS columns 实现）
-// 摘要预览直接用 frontmatter.gist（enrich 阶段已经生成的一段话摘要），
-// Live entry 没有 build-time CollectionEntry 那样的原始 .body 字段可用
+// Stage 2/3：改走轻量分页查询，不再经过 postgres-loader.ts 的全文渲染+逐条查
+// backlinks/tags；backlink 数量改成批量查询一次
 export const prerender = false
 
-import { getLiveCollection } from 'astro:content'
 import BaseLayout from '../../layouts/BaseLayout.astro'
 import HeroSection from '../../components/cards/HeroSection.astro'
-import AIBadge from '../../components/cards/AIBadge.astro'
+import ZettelCard from '../../components/cards/ZettelCard.astro'
+import { fetchDocumentSummariesByType, fetchBacklinkCounts, fetchDistinctFrontmatterFieldCount } from '../../lib/db'
+import { ZETTEL_PAGE_SIZE } from '../../lib/pagination'
 
-const { entries, error } = await getLiveCollection('zettel')
-if (error) throw error
-
-// 按 docDate desc 排序
-const all = [...(entries ?? [])].sort(
-  (a, b) => new Date(b.data.docDate as string).getTime() - new Date(a.data.docDate as string).getTime(),
-)
-
-// 兜底：老数据缺 frontmatter title 时从 slug 派生一个近似英文标题
-function deriveTitle(slug: string): string {
-  const m = slug.match(/^\d{12}-(.+)$/)
-  if (!m) return slug
-  return m[1].split('-').map((w) => w[0]?.toUpperCase() + w.slice(1)).join(' ')
-}
-
-const topicSet = new Set(all.map((e) => e.data.topic_slug))
-const eyebrow = `${all.length} 张 · ${topicSet.size} 主题`
+const [{ rows, total }, topicCount] = await Promise.all([
+  fetchDocumentSummariesByType('zettel', { limit: ZETTEL_PAGE_SIZE, offset: 0 }),
+  fetchDistinctFrontmatterFieldCount('zettel', 'topic_slug'),
+])
+const backlinkCounts = await fetchBacklinkCounts(rows.map((r) => r.id))
+const eyebrow = `${total} 张 · ${topicCount} 主题`
+const hasMore = rows.length < total
 ---
 
 <BaseLayout
@@ -38,38 +29,22 @@ const eyebrow = `${all.length} 张 · ${topicSet.size} 主题`
     subtitle="每张卡片聚焦一个核心概念，点开关联标签，串起完整的知识脉络"
   />
 
-  <div class="zettel-masonry">
-    {all.map((entry) => {
-      const title = (entry.data.title as string | undefined) ?? deriveTitle(entry.id)
-      const excerpt = (entry.data.gist as string | undefined) ?? ''
-      const created = entry.data.docDate as string
-      const backlinks = (entry.data.backlinks as unknown[]) ?? []
-      return (
-        <article class="zettel-card">
-          <div class="zettel-card-top">
-            <AIBadge />
-            <a href={`/topics/${entry.data.topic_slug}/`} class="lumina-chip zettel-card-chip">
-              #{entry.data.topic_slug}
-            </a>
-          </div>
-          <h3 class="zettel-card-title">
-            <a href={`/zettel/${entry.id}/`} class="zettel-card-link">{title}</a>
-          </h3>
-          <p class="zettel-card-excerpt">{excerpt}</p>
-          <div class="zettel-card-footer">
-            <span>{created}</span>
-            {backlinks.length > 0 && (
-              <span class="zettel-card-backlink-count">
-                <span class="material-symbols-outlined" style="font-size: 0.85rem;">arrow_upward</span>
-                {backlinks.length}
-              </span>
-            )}
-          </div>
-        </article>
-      )
-    })}
+  <div class="zettel-masonry" data-infinite-list data-endpoint="/zettel/more" data-page="2" data-mode="flat">
+    {rows.map((row) => (
+      <ZettelCard
+        id={row.id}
+        title={row.title}
+        gist={(row.frontmatter.gist as string | null) ?? null}
+        topicSlug={(row.frontmatter.topic_slug as string | null) ?? null}
+        docDate={row.doc_date}
+        backlinkCount={backlinkCounts.get(row.id) ?? 0}
+      />
+    ))}
+    {hasMore && <div data-scroll-sentinel></div>}
   </div>
 </BaseLayout>
+
+<script is:inline src="/infinite-scroll.js"></script>
 
 <style>
   .zettel-masonry {
@@ -79,80 +54,5 @@ const eyebrow = `${all.length} 张 · ${topicSet.size} 主题`
   }
   @media (max-width: 640px) {
     .zettel-masonry { columns: 1; }
-  }
-  .zettel-card {
-    display: block;
-    position: relative;
-    break-inside: avoid;
-    margin-bottom: 1rem;
-    padding: 1.25rem 1.5rem;
-    background: var(--surface-container-lowest);
-    border: 1px solid var(--color-lightgray);
-    border-left: 3px solid var(--ai-accent);
-    border-radius: var(--radius-xl);
-    color: var(--color-dark);
-    transition: box-shadow 0.2s ease, border-color 0.2s ease;
-  }
-  .zettel-card:has(.zettel-card-link:hover) {
-    box-shadow: var(--shadow-card-hover);
-    border-left-color: var(--ai-accent-dark);
-  }
-  .zettel-card-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
-  }
-  /* topic chip 是独立可点击链接，需高于 stretched-link 伪元素 */
-  .zettel-card-chip {
-    position: relative;
-    z-index: 1;
-  }
-  .zettel-card-title {
-    font-family: var(--font-header);
-    font-size: 1rem;
-    font-weight: 600;
-    line-height: 1.35;
-    margin: 0 0 0.25rem;
-  }
-  .zettel-card-subtitle {
-    margin: 0 0 0.5rem;
-    color: var(--color-gray);
-    font-size: 0.75rem;
-    font-style: italic;
-    line-height: 1.4;
-  }
-  /* stretched-link：标题链接用 ::after 撑满整卡，使全卡可点击且不违反 <a> 嵌套规范 */
-  .zettel-card-link {
-    color: inherit;
-    text-decoration: none;
-  }
-  .zettel-card-link::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-  }
-  .zettel-card-excerpt {
-    margin: 0 0 1rem;
-    color: var(--color-darkgray);
-    font-size: 0.875rem;
-    line-height: 1.6;
-  }
-  .zettel-card-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-family: var(--font-header);
-    font-size: 0.7rem;
-    letter-spacing: 0.05em;
-    color: var(--color-gray);
-    text-transform: uppercase;
-  }
-  .zettel-card-backlink-count {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    color: var(--color-secondary);
   }
 </style>

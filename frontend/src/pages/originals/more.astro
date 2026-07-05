@@ -1,0 +1,30 @@
+---
+// AInews · Originals 滑动懒加载片段端点：只返回卡片 HTML，不含 layout/head
+// 供 public/infinite-scroll.js 的 fetch 调用，不是给用户直接访问的页面
+export const prerender = false
+
+import OriginalCard from '../../components/cards/OriginalCard.astro'
+import { fetchDocumentSummariesByType } from '../../lib/db'
+import { ORIGINALS_PAGE_SIZE } from '../../lib/pagination'
+
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+const offset = (page - 1) * ORIGINALS_PAGE_SIZE
+
+const { rows, total } = await fetchDocumentSummariesByType('original', { limit: ORIGINALS_PAGE_SIZE, offset })
+const hasMore = offset + rows.length < total
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  {rows.map((row) => (
+    <OriginalCard
+      id={row.id}
+      title={row.title}
+      docDate={row.doc_date}
+      wordCount={(row.frontmatter.word_count as number | null) ?? null}
+      sourceName={row.frontmatter.source_name as string | null}
+    />
+  ))}
+</div>

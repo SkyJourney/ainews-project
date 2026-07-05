@@ -1,0 +1,69 @@
+---
+// AInews · Daily 时间线的单个月份分组，从 daily/index.astro 抽出
+// 必须是独立组件（不是内联在页面模板里）：Astro 的 scoped style 按文件加哈希，
+// index.astro 首屏渲染的分组和 more.astro 懒加载片段渲染的分组如果分别内联在两个
+// 页面文件里，会各自拿到不同的 data-astro-cid 哈希，导致 more.astro 加载出来的
+// 分组丢失 grid/sticky 布局样式——抽成组件后两边引用的是同一份文件，哈希一致。
+import IntelligenceCard from './IntelligenceCard.astro'
+import type { DailyMonthGroup as DailyMonthGroupData } from '../../lib/daily-grouping'
+
+interface Props {
+  group: DailyMonthGroupData
+}
+const { group } = Astro.props
+---
+
+<section class="daily-tl-group" data-month={group.key}>
+  <aside class="daily-tl-month">{group.label}</aside>
+  <div class="daily-tl-entries" data-month-entries>
+    {group.entries.map((row) => {
+      const dateLabel = row.id
+      const topicList = (row.frontmatter.topics as string[]) ?? []
+      const topics = topicList.slice(0, 4).join(' · ')
+      const stats = (row.frontmatter.stats as Record<string, number>) ?? {}
+      const meta = `${stats.articles_processed ?? 0} 条 · ${topicList.length} 主题`
+      return (
+        <IntelligenceCard
+          href={`/daily/${row.id}/`}
+          eyebrow={dateLabel}
+          title={`AI 资讯日报 ${dateLabel}`}
+          summary={topics}
+          metaLine={meta}
+          ai={true}
+        />
+      )
+    })}
+  </div>
+</section>
+
+<style>
+  .daily-tl-group {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 2rem;
+  }
+  .daily-tl-month {
+    position: sticky;
+    top: 5rem;
+    height: fit-content;
+    font-family: var(--font-header);
+    font-size: 0.85rem;
+    letter-spacing: 0.1em;
+    color: var(--color-secondary);
+    text-transform: uppercase;
+    padding-top: 0.15rem;
+  }
+  .daily-tl-entries {
+    display: grid;
+    gap: 1rem;
+  }
+  @media (max-width: 768px) {
+    .daily-tl-group {
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
+    .daily-tl-month {
+      position: static;
+    }
+  }
+</style>

@@ -287,6 +287,25 @@ def test_daily_record_body_does_not_repeat_title(mocker):
     assert "AI 日报" not in record["body_md"].split("\n\n")[0]
 
 
+def test_daily_record_topic_heading_has_emoji_and_wikilink(mocker):
+    mocker.patch.object(aggregate, "aggregate_get_daily_by_date", return_value=None)
+    mocker.patch.object(aggregate, "call_structured")
+    articles = [make_enriched_article(url="https://a.com/1")]
+    decisions = {"https://a.com/1": {"topic_slug": "agents", "is_new_topic": False}}
+    per_article_ctx = {
+        "https://a.com/1": {
+            "original_id": "original-abc",
+            "zettel_id": None,
+            "is_new_zettel": False,
+            "topic_slug": "agents",
+            "is_recap": False,
+        }
+    }
+    record = aggregate._build_daily_record(articles, decisions, per_article_ctx, date(2026, 7, 5))
+    assert "## 🤖 Agent [[agents]]" in record["body_md"]
+    assert "agents" in record["link_targets"]  # Topic 反链要看到这条 Daily 引用过它
+
+
 def test_digest_record_body_does_not_repeat_title(mocker):
     mocker.patch.object(aggregate, "load_sources", return_value={"openai-rss": object()})
     articles = [make_enriched_article(url="https://a.com/1", source_name="openai-rss")]

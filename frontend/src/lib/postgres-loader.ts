@@ -19,7 +19,7 @@ function toBacklinkData(rows: BacklinkRow[]) {
 
 async function toLiveEntry(row: DocumentRow) {
   const [html, backlinkRows, tags] = await Promise.all([
-    renderMarkdownToHtml(row.body_md),
+    renderMarkdownToHtml(row.body_md, row.content_hash),
     fetchBacklinks(row.id),
     fetchTags(row.id),
   ])

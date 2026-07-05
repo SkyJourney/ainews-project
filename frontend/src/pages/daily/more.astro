@@ -1,0 +1,25 @@
+---
+// AInews · Daily 滑动懒加载片段端点：返回完整的按月分组 section
+// infinite-scroll.js 的 grouped 模式会检查返回的第一个 section 的 data-month
+// 是不是跟页面上已渲染的最后一个月分组相同，相同则合并 entries 而不是重复渲染月份标题
+export const prerender = false
+
+import DailyMonthGroup from '../../components/cards/DailyMonthGroup.astro'
+import { fetchDocumentSummariesByType } from '../../lib/db'
+import { DAILY_PAGE_SIZE } from '../../lib/pagination'
+import { groupByMonth } from '../../lib/daily-grouping'
+
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+const offset = (page - 1) * DAILY_PAGE_SIZE
+
+const { rows, total } = await fetchDocumentSummariesByType('daily', { limit: DAILY_PAGE_SIZE, offset })
+const groups = groupByMonth(rows)
+const hasMore = offset + rows.length < total
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  {groups.map((g) => <DailyMonthGroup group={g} />)}
+</div>
