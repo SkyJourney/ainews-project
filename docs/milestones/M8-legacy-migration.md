@@ -49,12 +49,29 @@
 
 **Wikilink 重写规则**：只重写命中已知合法 ID 正则的链接（`YYYYMMDDHHmm-slug` / topic slug / `YYYY-MM-DD` 日期 / 新计算出的 `original-<hash>`）；已知的悬空裸时间戳链接与 arXiv 脚注伪链接一律跳过，不生成对应的 `links` 行（避免建出指向不存在文档的错误引用）。
 
-## 任务清单（设计已定稿，实际执行留到 M7 观察期结束后）
+## 任务清单
 
-- [ ] 编写迁移脚本（复用 `vault-loader.ts` 的分类/解析思路改写成 Python，或直接用 Python 生态的 YAML/frontmatter 库重新实现，不强求跨语言复用）
-- [ ] 按上表策略逐类型导入：Zettel → Topic → Daily → Digest → Original（建议顺序：先处理不依赖去重判断的 Topic/Daily/Digest，再处理需要按 URL 反查的 Zettel/Original）
+- [x] 编写迁移脚本：`backend/scripts/migrate_legacy_vault.py`，复用 `worker.db`/`worker.aggregate`/`worker.filter` 里已有的 `upsert_document`/`document_id_exists`/`filter_lookup_url_index`/`_content_hash`/`_humanize_slug` 等函数，不重新发明写入逻辑；默认 dry-run，`--execute` 才真正写库
+- [x] Dry-run 验证：对着真实 vault + 真实 Postgres 跑通，人工抽查合并/链接重写结果（见下方"Dry-run 结果"）
+- [ ] 实际执行导入（`--execute`），仍建议等 M7 观察期结束后再做
 - [ ] 迁移后校验：抽样对比迁移前后 wikilink 解析结果、`tags`/`links` 表行数是否符合预期
 - [ ] 更新本文件状态为"已完成"，补充真实执行的落地方式说明（数量统计、耗时、发现的额外边界情况）
+
+## Dry-run 结果（2026-07-05，已修复损坏文件后的最终结果）
+
+```
+original: 计划导入 138 条，跳过（新系统已有）61 条
+zettel:   计划导入 106 条，跳过（新系统已有）6 条
+topic:    计划导入 13 条（9 个合并回填历史日期区块 + 4 个全新创建）
+daily:    计划导入 8 条，跳过（新系统已有）1 条（07-05）
+digest:   计划导入 7 条，跳过（新系统已有）1 条（07-05）
+悬空/伪 wikilink 丢弃：51 处
+Original 旧 id → 新 id 映射：199 条（全部 341 个文件均解析成功，0 parse_errors）
+```
+
+人工抽查确认：`agents` topic 合并后日期区块正确降序排列（07-05 现有内容在前，07-04 起的历史内容追加在后，无重复）；`10-Daily/2026-07-03.md`/`2026-07-02.md` 里大量 `[[YYYY-MM-DD-HHMM-slug]]` 格式的旧 Original 引用全部正确重写成了 `[[original-<hash>]]`；Zettel 的合成 gist 字段可读、长度合理。
+
+**修复了 1 处旧 vault 数据损坏**：`60-Originals/2026-07-04-0900-breaking-failure-cascades-step-aware-reinforcement.md` 的 `title` 字段单引号原本没有闭合（跨行吃掉了下一行 `original_title`），不是"未加引号含冒号"这种脚本能自动修复的已知模式，手动补上闭合引号后重跑 dry-run，全部 341 个文件解析零错误。
 
 ## 验收标准
 
