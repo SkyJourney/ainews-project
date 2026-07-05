@@ -198,6 +198,65 @@ def fetch_enriched_articles(batch_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def aggregate_list_topic_slugs() -> list[str]:
+    """aggregate_activity 专用：查询当前实际存在的全部 topic slug（04 §2.5 `is_new` 强制
+    规则——唯一依据是这里查出来的实际存储状态，不允许凭模型自己的判断推断）。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id FROM documents WHERE doc_type = 'topic'")).all()
+    return [row[0] for row in rows]
+
+
+def aggregate_lookup_url_index_entry(normalized_url: str) -> dict | None:
+    """只读查询，一次拿到 aggregate_activity 需要的两个字段：`zettel_id`（Zettel 三级
+    复用判断①用）+ `first_seen_date`（Daily"复盘"情形判定用，04 §2.5）。不越权碰这张表
+    的其他字段——写操作仍然只属于 filter_* 系列和 write_backfill_zettel_id。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT zettel_id, first_seen_date FROM url_index WHERE normalized_url = :url"),
+            {"url": normalized_url},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def aggregate_search_zettel_by_slug(slug: str) -> str | None:
+    """Zettel 三级复用判断②：索引没有记录时，按 slug 后缀搜索现有 Zettel 文档（04 §2.5）。
+    Zettel id 固定格式 `<12位时间戳>-<slug>`，同一 slug 可能匹配多条历史记录，取最近更新的一条。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT id FROM documents WHERE doc_type = 'zettel' AND id LIKE :pattern "
+                "ORDER BY updated_at DESC LIMIT 1"
+            ),
+            {"pattern": f"%-{slug}"},
+        ).first()
+    return row[0] if row else None
+
+
+def aggregate_get_document(doc_id: str) -> dict | None:
+    """读取已有文档（Topic 追加铁律需要先读旧文档才能决定怎么合并写回，04 §2.5/§2.6）。"""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT * FROM documents WHERE id = :id"), {"id": doc_id}).mappings().first()
+    return dict(row) if row else None
+
+
+def aggregate_get_daily_by_date(doc_date: date) -> dict | None:
+    """Daily"昨日回顾"需要查昨天的 Daily 文档（04 §2.5）。"""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT * FROM documents WHERE doc_type = 'daily' AND doc_date = :d"),
+            {"d": doc_date},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 def document_id_exists(doc_id: str) -> bool:
     """给 write 阶段的 ID 冲突顺延逻辑（04 §2.6：同 HHMM 冲突顺延）用。"""
     engine = get_engine()
@@ -281,24 +340,28 @@ def write_backfill_zettel_id(normalized_url: str, zettel_id: str) -> None:
         )
 
 
-def upsert_zettel_document(
+def upsert_document(
     *,
     doc_id: str,
+    doc_type: str,
     title: str,
-    doc_date: date,
+    doc_date: date | None,
     frontmatter: dict,
     body_md: str,
     content_hash: str,
 ) -> None:
-    """write_activity：直接 upsert 进 documents 表，doc_type 固定 'zettel'（M1 scope）。"""
+    """write_activity：直接 upsert 进 documents 表，doc_type 由调用方指定——M5 起五类文档
+    （original/zettel/topic/daily/digest）统一走这一个函数，不再各写各的（04 §2.6）。
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
                 INSERT INTO documents (id, doc_type, title, doc_date, frontmatter, body_md, content_hash, updated_at)
-                VALUES (:id, 'zettel', :title, :doc_date, CAST(:frontmatter AS JSONB), :body_md, :content_hash, now())
+                VALUES (:id, :doc_type, :title, :doc_date, CAST(:frontmatter AS JSONB), :body_md, :content_hash, now())
                 ON CONFLICT (id) DO UPDATE SET
+                    doc_type = EXCLUDED.doc_type,
                     title = EXCLUDED.title,
                     doc_date = EXCLUDED.doc_date,
                     frontmatter = EXCLUDED.frontmatter,
@@ -309,6 +372,7 @@ def upsert_zettel_document(
             ),
             {
                 "id": doc_id,
+                "doc_type": doc_type,
                 "title": title,
                 "doc_date": doc_date,
                 "frontmatter": json.dumps(frontmatter, ensure_ascii=False, default=str),
@@ -316,3 +380,31 @@ def upsert_zettel_document(
                 "content_hash": content_hash,
             },
         )
+
+
+def sync_document_tags(doc_id: str, tags: list[str]) -> None:
+    """幂等重建某文档的 `tags` 行（先删后插）：tags 反映的是"这次打标判断"的最新结果，
+    不需要跨批次累积，全量重建即可（04 §2.5 Tags 四轴策略落地）。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM tags WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+        for tag in tags:
+            conn.execute(
+                text("INSERT INTO tags (doc_id, tag) VALUES (:doc_id, :tag) ON CONFLICT DO NOTHING"),
+                {"doc_id": doc_id, "tag": tag},
+            )
+
+
+def sync_document_links(from_id: str, to_ids: list[str]) -> None:
+    """新增 wikilink 出边（04 §2.5/§2.7）：只增量插入，不做先删后插的全量重建——Topic/Daily
+    这类追加型文档的历史出边需要长期保留，不能因为某次调用只传入"本批次新增的链接"就把
+    历史边冲掉。`links.to_id` 有外键约束，调用方需保证 to_id 对应的文档已经存在。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        for to_id in to_ids:
+            conn.execute(
+                text("INSERT INTO links (from_id, to_id) VALUES (:from_id, :to_id) ON CONFLICT DO NOTHING"),
+                {"from_id": from_id, "to_id": to_id},
+            )

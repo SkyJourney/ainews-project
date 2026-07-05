@@ -40,3 +40,8 @@ defusedxml==0.7.1
 # （能过 JS 挑战/部分 Cloudflare 反爬，direct/Jina 都是纯 HTTP 客户端做不到这点）。
 # backend/Dockerfile 需要额外 `playwright install --with-deps chromium` 装浏览器二进制。
 playwright==1.61.0
+
+# ── M5：单元测试基建（工程化收敛补项，此前 M0-M4 全靠真实 Temporal 批次验证，
+# M5 起 aggregate/write 引入跨批次累积状态，光靠真实批次测试成本变高）──
+pytest==9.1.1
+pytest-mock==3.15.1

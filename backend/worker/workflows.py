@@ -166,14 +166,18 @@ class AInewsPipelineWorkflow:
         records = await workflow.execute_activity(
             aggregate_activity,
             params.batch_id,
-            start_to_close_timeout=timedelta(seconds=30),
+            # M5 起这里含两次覆盖整批文章的 LLM 调用（聚类+打标），30s 是 M1 纯 Python
+            # 版本的遗留值，真实批次（100+ 篇）单次调用就可能超过 30s，留够余量。
+            start_to_close_timeout=timedelta(seconds=180),
             retry_policy=default_retry,
         )
 
         written = await workflow.execute_activity(
             write_activity,
             records,
-            start_to_close_timeout=timedelta(seconds=30),
+            # M5 起每条记录（original/zettel/topic/daily/digest）都要 upsert+同步
+            # tags/links，真实批次记录数比 M1-M4 明显增多，留够余量。
+            start_to_close_timeout=timedelta(seconds=90),
             retry_policy=default_retry,
         )
 

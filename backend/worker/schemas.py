@@ -114,6 +114,57 @@ class TranslationCompletenessReview(BaseModel):
     reason: str = Field(description="判断依据，一句话说明具体理由")
 
 
+class ClusterEntryAssignment(BaseModel):
+    """聚类判断里单篇文章的分桶结果（04 §2.5）。不含 is_new 字段——是否新建 topic
+    的最终判据是实际存储状态（查 documents 表），不能由模型自己的判断决定，
+    这里只提供"建议的 topic_slug"，交给代码核验。
+    """
+
+    url: str = Field(description="对应文章的原文 URL，必须和输入的某一条完全一致，不能编造或遗漏")
+    topic_slug: str = Field(description="建议分配到的 topic slug：优先从给定的预设桶里选，"
+                             "确有必要且同类文章足够多时才建议一个新 slug（kebab-case）")
+    zettel_worthy: bool = Field(
+        description="是否值得升级为独立的原子笔记：概念/方法首次出现、重大事件锚点（半年后回看仍重要）、"
+        "或含可复用洞察，三选一命中才算 true"
+    )
+    rationale: str = Field(description="一句话说明分桶依据和 zettel_worthy 判断理由")
+
+
+class ClusterAssignment(BaseModel):
+    """topic 聚类 tool schema：唯一允许跨文章判断的地方（04 §2.5），一次调用处理整批文章。"""
+
+    assignments: list[ClusterEntryAssignment] = Field(
+        description="本批次每一篇输入文章的分桶结果，数量必须与输入文章数一致，不能遗漏或新增条目"
+    )
+
+
+class DailyHighlights(BaseModel):
+    """Daily TL;DR 的关键事件筛选 tool schema：只做"选哪几条"的跨文章比较判断，
+    不重新生成摘要文本——TL;DR 展示文案直接复用 enrich 阶段已经产出的 gist。
+    """
+
+    highlight_urls: list[str] = Field(
+        description="从输入文章里选出 3-5 条最值得放进今日 TL;DR 的关键事件对应 URL，"
+        "必须是输入里出现过的 URL，不能编造"
+    )
+
+
+class TagAssignmentEntry(BaseModel):
+    url: str = Field(description="对应文章的原文 URL，必须和输入的某一条完全一致")
+    tags: list[str] = Field(
+        description="2-5 个 kebab-case 全小写标签，覆盖技术领域/产品公司/事件类型/来源质量四个维度，"
+        "不发明新分类轴，不打宽泛无信息量标签（如 'ai'/'news' 这类）"
+    )
+
+
+class TagAssignment(BaseModel):
+    """Tags 四轴打标 tool schema（04 §2.5），批量处理整批文章。"""
+
+    assignments: list[TagAssignmentEntry] = Field(
+        description="本批次每一篇输入文章的打标结果，数量必须与输入文章数一致"
+    )
+
+
 class ArticleMetadata(BaseModel):
     """富元数据抽取 tool schema（04 §2.4）：只判断"这篇文章本身是什么"，不做跨文章判断。"""
 
