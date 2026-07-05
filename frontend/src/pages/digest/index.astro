@@ -1,0 +1,50 @@
+---
+// AInews · Digest 列表（M6 新增，旧前端从未消费过这类文档）
+// Digest 定位"可独立分享打印"，不含 wikilink，结构比 Daily 简单很多
+export const prerender = false
+
+import { getLiveCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
+
+const { entries, error } = await getLiveCollection('digest')
+if (error) throw error
+
+// digest 的 id 是 "digest-YYYY-MM-DD"，字符串倒序即为日期倒序
+const all = [...(entries ?? [])].sort((a, b) => b.id.localeCompare(a.id))
+const eyebrow = `${all.length} 期`
+---
+
+<BaseLayout title="Digest · 摘要速览" description="AInews 摘要速览 · 事实性条目，适合独立分享">
+  <HeroSection
+    eyebrow={eyebrow}
+    title="摘要速览"
+    subtitle="每条 2-3 句话的事实性摘要，来源标识与原文链接齐全，适合独立分享或打印"
+  />
+
+  <div class="digest-list">
+    {all.map((entry) => {
+      const dateLabel = entry.id.replace(/^digest-/, '')
+      const entryCount = (entry.data.entry_count as number | null) ?? 0
+      return (
+        <IntelligenceCard
+          href={`/digest/${entry.id}/`}
+          eyebrow={dateLabel}
+          title={`AI Digest ${dateLabel}`}
+          summary={`共 ${entryCount} 条`}
+          metaLine=""
+          ai={false}
+        />
+      )
+    })}
+  </div>
+</BaseLayout>
+
+<style>
+  .digest-list {
+    display: grid;
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+</style>

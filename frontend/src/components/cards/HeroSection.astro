@@ -1,0 +1,46 @@
+---
+// AInews · HeroSection · 页面顶部大标题区
+// 用途：列表页品类名 · 详情页 title · landing 主题横幅
+interface Props {
+  eyebrow?: string
+  title: string
+  subtitle?: string
+  large?: boolean // 3.5rem vs 2.5rem
+}
+const { eyebrow, title, subtitle, large = false } = Astro.props
+---
+
+<header class={`lumina-hero ${large ? 'is-large' : ''}`}>
+  {eyebrow && <div class="lumina-eyebrow lumina-hero-eyebrow">{eyebrow}</div>}
+  <h1 class="lumina-hero-title">{title}</h1>
+  {subtitle && <p class="lumina-hero-subtitle">{subtitle}</p>}
+</header>
+
+<style>
+  .lumina-hero {
+    padding: 2.5rem 0 2rem;
+  }
+  .lumina-hero.is-large {
+    padding: 4rem 0 3rem;
+  }
+  .lumina-hero-eyebrow {
+    margin-bottom: 0.75rem;
+  }
+  .lumina-hero-title {
+    font-size: 2.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin: 0;
+    color: var(--color-dark);
+  }
+  .lumina-hero.is-large .lumina-hero-title {
+    font-size: 3.5rem;
+  }
+  .lumina-hero-subtitle {
+    margin: 1rem 0 0;
+    font-size: 1.125rem;
+    color: var(--color-darkgray);
+    max-width: 640px;
+  }
+</style>

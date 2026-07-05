@@ -148,6 +148,32 @@ services:
     networks:
       - ainews
 
+  # M6：Astro SSR，Live Content Collections 请求时只读查 documents 表。不经过
+  # backend 镜像，前端是独立的 Node 服务；只读挂载同一个 images 卷做配图静态服务
+  # （见 frontend/src/pages/media/[...path].ts）。
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: ainews-service/frontend:${FRONTEND_IMAGE_TAG:-0.1.0}
+    container_name: ainews-service-web
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      HOST: 0.0.0.0
+      PORT: 4321
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ainews}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-ainews_content}
+      IMAGE_STORAGE_DIR: /app/media
+    ports:
+      - "${WEB_PORT:-4321}:4321"
+    volumes:
+      - images:/app/media:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ainews
+
 networks:
   ainews:
     name: ainews-service

@@ -1,0 +1,32 @@
+---
+// AInews · ChipsRail · 水平滚动 chip 排（用于 topics 显示，chip.slug 始终是 topic slug）
+interface Chip {
+  label: string
+  slug: string // topic slug（documents.id，doc_type='topic'）
+}
+interface Props {
+  chips: Chip[]
+  maxVisible?: number
+}
+const { chips, maxVisible = 12 } = Astro.props
+const visible = chips.slice(0, maxVisible)
+const rest = chips.length - visible.length
+---
+
+<div class="lumina-chips-rail">
+  {visible.map((c) => (
+    <a href={`/topics/${c.slug}/`} class="lumina-chip">
+      #{c.label}
+    </a>
+  ))}
+  {rest > 0 && <span class="lumina-chip">+{rest}</span>}
+</div>
+
+<style>
+  .lumina-chips-rail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1.5rem 0;
+  }
+</style>

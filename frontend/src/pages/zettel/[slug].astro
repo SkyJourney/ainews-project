@@ -1,0 +1,111 @@
+---
+// AInews · Zettel 详情页 /zettel/{id}/
+// 内容 · AIBadge + topic chip · 右栏 LuminaBacklinks
+// 注：M6 起 Zettel 是可被多篇文章复用的精选笔记（不再是"每篇文章一张卡"），
+// 不再有单一固定的"来源"，改为链接回本次收录时关联的原文归档（original_id）
+export const prerender = false
+
+import { getLiveEntry, render } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import AIBadge from '../../components/cards/AIBadge.astro'
+import LuminaBacklinks from '../../components/enhance/LuminaBacklinks.astro'
+
+const { slug } = Astro.params
+const { entry, error } = await getLiveEntry('zettel', slug!)
+if (error || !entry) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+const { Content } = await render(entry)
+
+// 兜底：老数据缺 frontmatter title 时从 slug 派生一个近似英文标题
+function deriveTitle(slug: string): string {
+  const m = slug.match(/^\d{12}-(.+)$/)
+  if (!m) return slug
+  return m[1].split('-').map((w) => w[0]?.toUpperCase() + w.slice(1)).join(' ')
+}
+
+const title = (entry.data.title as string | undefined) ?? deriveTitle(entry.id)
+const createdIso = (entry.data.docDate as string | null) ?? entry.id
+const topicSlug = entry.data.topic_slug as string
+const originalId = entry.data.original_id as string | undefined
+const tags = (entry.data.tags as string[]) ?? []
+---
+
+<BaseLayout title={title} description={`AI 原子卡片 · ${topicSlug}`}>
+  <article class="zettel-detail">
+    <div class="zettel-detail-badges">
+      <AIBadge />
+      <a href={`/topics/${topicSlug}/`} class="lumina-chip">#{topicSlug}</a>
+      {tags.slice(0, 4).map((t) => (
+        <a href={`/tags/${encodeURIComponent(t)}/`} class="lumina-chip" style="opacity: 0.75;">{t}</a>
+      ))}
+    </div>
+
+    <HeroSection
+      eyebrow={`Zettel · ${createdIso}`}
+      title={title}
+    />
+
+    <div class="zettel-detail-layout">
+      <div class="zettel-detail-body lumina-reading-well">
+        <Content />
+
+        {originalId && (
+          <div class="zettel-detail-source">
+            <div class="lumina-eyebrow">原文归档</div>
+            <a href={`/originals/${originalId}/`}>查看完整原文与译文 →</a>
+          </div>
+        )}
+      </div>
+
+      <aside class="zettel-detail-aside">
+        <LuminaBacklinks backlinks={entry.data.backlinks ?? []} />
+      </aside>
+    </div>
+  </article>
+</BaseLayout>
+
+<style>
+  .zettel-detail {
+    padding-block: 1rem 4rem;
+  }
+  .zettel-detail-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .zettel-detail-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 3rem;
+    margin-top: 2rem;
+  }
+  @media (max-width: 900px) {
+    .zettel-detail-layout {
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+  }
+  .zettel-detail-body {
+    font-size: 1.05rem;
+    line-height: 1.75;
+  }
+  .zettel-detail-source {
+    margin-top: 3rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--surface-container-low);
+    border-radius: var(--radius-lg);
+    font-size: 0.9rem;
+  }
+  .zettel-detail-source > .lumina-eyebrow {
+    margin-bottom: 0.5rem;
+  }
+  .zettel-detail-source a {
+    word-break: break-all;
+  }
+  .zettel-detail-source-name {
+    color: var(--color-gray);
+  }
+</style>

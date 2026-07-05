@@ -1,0 +1,82 @@
+---
+// AInews · Daily 详情内容（`/` 与 `/daily/[slug]` 共用）
+// 从 markdown-rendered <Content /> 渲染主体，前置 Hero + ChipsRail
+import { render } from 'astro:content'
+import HeroSection from '../cards/HeroSection.astro'
+import ChipsRail from '../cards/ChipsRail.astro'
+import AIBadge from '../cards/AIBadge.astro'
+import LuminaBacklinks from '../enhance/LuminaBacklinks.astro'
+
+interface Props {
+  entry: any // Live Collection entry，M6 起数据源是 Postgres，不再有 build-time CollectionEntry 类型
+}
+
+const { entry } = Astro.props
+const { Content } = await render(entry)
+
+const dateLabel = entry.id
+const createdIso = (entry.data.docDate as string | null) ?? dateLabel
+const stats = (entry.data.stats as Record<string, number>) ?? {}
+const topics = (entry.data.topics as string[]) ?? []
+const previousDaily = entry.data.previous_daily as string | null | undefined
+const meta = `${stats.articles_processed ?? 0} 条 · ${topics.length} 主题`
+const chips = topics.map((slug) => ({ label: slug, slug }))
+---
+
+<article class="daily-content">
+  <div class="daily-content-badge-row">
+    <AIBadge />
+    <span class="daily-content-date">{createdIso}</span>
+  </div>
+
+  <HeroSection
+    eyebrow={`每日简报 · ${dateLabel}`}
+    title={`AI 资讯日报 ${dateLabel}`}
+    subtitle={meta}
+    large={true}
+  />
+
+  {chips.length > 0 && <ChipsRail chips={chips} />}
+
+  {previousDaily && (
+    <p class="daily-content-prev">
+      ← 昨日：<a href={`/daily/${previousDaily}/`}>{previousDaily}</a>
+    </p>
+  )}
+
+  <div class="daily-content-body lumina-reading-well">
+    <Content />
+  </div>
+
+  <LuminaBacklinks backlinks={entry.data.backlinks ?? []} />
+</article>
+
+<style>
+  .daily-content {
+    padding-block: 1rem 4rem;
+  }
+  .daily-content-badge-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    color: var(--color-gray);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .daily-content-date {
+    display: inline-flex;
+    align-items: center;
+  }
+  .daily-content-prev {
+    margin: 0 0 2rem;
+    color: var(--color-darkgray);
+    font-size: 0.9rem;
+  }
+  .daily-content-body {
+    font-size: 1rem;
+    line-height: 1.75;
+  }
+</style>

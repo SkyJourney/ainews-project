@@ -231,3 +231,64 @@ def test_original_doc_id_stable_across_calls():
 
 def test_original_doc_id_differs_for_different_urls():
     assert aggregate._original_doc_id("https://a.com/1") != aggregate._original_doc_id("https://a.com/2")
+
+
+# ---------------------------------------------------------------------------
+# 回归测试：body_md 不应该重复拼一遍 title（M6 真实页面验证发现的 bug——
+# title 已经是独立字段，frontend 详情页会单独渲染一次，body_md 里再重复一次
+# "# {title}" 会导致页面标题渲染两遍）
+# ---------------------------------------------------------------------------
+
+def _first_nonblank_line(body_md: str) -> str:
+    return next(line for line in body_md.split("\n") if line.strip())
+
+
+def test_original_record_body_does_not_repeat_title():
+    article = make_enriched_article(translated_title="示例标题", translated_summary="正文第一行\n\n正文第二行")
+    decision = {"topic_slug": "agents", "is_new_topic": False, "zettel_worthy": False, "rationale": "r"}
+    record = aggregate._build_original_record(article, "original-abc", None, decision, [])
+    assert record["title"] == "示例标题"
+    assert _first_nonblank_line(record["body_md"]) != f"# {record['title']}"
+    assert "示例标题" not in record["body_md"]  # 标题文本完全不该出现在正文里
+
+
+def test_zettel_record_body_does_not_repeat_title():
+    article = make_enriched_article(translated_title="示例标题", gist="这是摘要")
+    decision = {"topic_slug": "agents", "is_new_topic": False, "zettel_worthy": True, "rationale": "r"}
+    record = aggregate._build_zettel_record(article, "202607050931-example", "original-abc", decision, [])
+    assert _first_nonblank_line(record["body_md"]) != f"# {record['title']}"
+    assert "示例标题" not in record["body_md"]
+
+
+def test_topic_record_first_creation_body_does_not_repeat_title(mocker):
+    mocker.patch.object(aggregate, "aggregate_get_document", return_value=None)
+    article = make_enriched_article()
+    record = aggregate._build_topic_record("agents", [(article, None, "original-abc123")], date(2026, 7, 5))
+    assert _first_nonblank_line(record["body_md"]) == "## 2026-07-05"  # 直接是日期区块，不是标题
+    assert "Agents" not in record["body_md"].split("\n")[0]
+
+
+def test_daily_record_body_does_not_repeat_title(mocker):
+    mocker.patch.object(aggregate, "aggregate_get_daily_by_date", return_value=None)
+    mocker.patch.object(aggregate, "call_structured")  # 避免真实 LLM 调用（<=5 篇会跳过，这里保险起见也 mock 掉）
+    articles = [make_enriched_article(url="https://a.com/1")]
+    decisions = {"https://a.com/1": {"topic_slug": "agents", "is_new_topic": False}}
+    per_article_ctx = {
+        "https://a.com/1": {
+            "original_id": "original-abc",
+            "zettel_id": None,
+            "is_new_zettel": False,
+            "topic_slug": "agents",
+            "is_recap": False,
+        }
+    }
+    record = aggregate._build_daily_record(articles, decisions, per_article_ctx, date(2026, 7, 5))
+    assert _first_nonblank_line(record["body_md"]) == "## TL;DR"
+    assert "AI 日报" not in record["body_md"].split("\n\n")[0]
+
+
+def test_digest_record_body_does_not_repeat_title(mocker):
+    mocker.patch.object(aggregate, "load_sources", return_value={"openai-rss": object()})
+    articles = [make_enriched_article(url="https://a.com/1", source_name="openai-rss")]
+    record = aggregate._build_digest_record(articles, date(2026, 7, 5))
+    assert not record["body_md"].startswith("#")

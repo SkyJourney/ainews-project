@@ -1,0 +1,253 @@
+/* AInews · Lumina Intelligence Design Tokens
+ * 从 F2.4 P2 的 custom.scss 提炼，去 Sass 语法，纯 CSS。
+ * 共 49 变量 + 8 utility class + 3 layer 玻璃拟态 + Emerald AI 差异化。
+ * 参考归档：.claude/skills/ai-news/notes/_archive/F2.4-tokens-lumina-to-quartz.md
+ */
+
+:root {
+  /* ---------- Lumina 9 标准色（前 Quartz 覆盖，现直接定义） ---------- */
+  --color-light: #faf8ff;           /* 主背景 · 冷调 near-white */
+  --color-lightgray: #c3c5d9;       /* outline-variant · 弱分隔线 */
+  --color-gray: #737688;            /* outline · 元数据文字 */
+  --color-darkgray: #434656;        /* on-surface-variant · 次文本 */
+  --color-dark: #131b2e;            /* on-surface · Deep Navy 主文本 */
+  --color-secondary: #003ec7;       /* primary · Electric Blue 主链接 */
+  --color-tertiary: #0052ff;        /* primary-container · 次链接 hover */
+  --color-highlight: rgba(0, 82, 255, 0.10);
+  --color-text-highlight: #6cf8bb88; /* Emerald secondary-container 50% */
+
+  /* ---------- Surface 语义分层（Material Design 3 · 6 阶） ---------- */
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f2f3ff;
+  --surface-container: #eaedff;
+  --surface-container-high: #e2e7ff;
+  --surface-container-highest: #dae2fd;
+  --surface-dim: #d2d9f4;
+  --surface-variant: #dae2fd;
+  --surface-tint: #004ced;
+  --inverse-surface: #283044;
+  --inverse-on-surface: #eef0ff;
+  --inverse-primary: #b7c4ff;
+
+  /* ---------- Primary 家族（Electric Blue） ---------- */
+  --primary-container: #0052ff;
+  --on-primary: #ffffff;
+  --on-primary-container: #dfe3ff;
+  --primary-fixed: #dde1ff;
+  --primary-fixed-dim: #b7c4ff;
+
+  /* ---------- 🟢 Emerald · AI 专用 ---------- */
+  --ai-accent: #4edea3;
+  --ai-accent-light: #6cf8bb;
+  --ai-accent-dark: #006c49;
+  --ai-accent-on: #002113;
+  --ai-accent-container-on: #00714d;
+  --ai-selection-bg: #6cf8bb;
+  --ai-selection-fg: #002113;
+
+  /* ---------- Tertiary · Warm Red 强调 ---------- */
+  --tertiary-accent: #952200;
+  --tertiary-accent-light: #ffb4a1;
+  --tertiary-container: #bf3003;
+
+  /* ---------- 圆角 7 阶（Lumina "Highly Rounded"） ---------- */
+  --radius-sm: 0.25rem;      /* 4px */
+  --radius-default: 0.5rem;  /* 8px */
+  --radius-lg: 0.75rem;      /* 12px */
+  --radius-xl: 1rem;         /* 16px */
+  --radius-2xl: 1.5rem;      /* 24px · 卡片默认 */
+  --radius-3xl: 2rem;        /* 32px · Hero / Featured */
+  --radius-full: 9999px;     /* Pill / Dock / Chip */
+
+  /* ---------- 间距 6 阶（720 阅读区 + 1280 主容器） ---------- */
+  --lumina-unit: 8px;
+  --lumina-gutter: 32px;
+  --lumina-margin-edge: 40px;
+  --lumina-section-gap: 80px;
+  --lumina-container-max: 1280px;
+  --lumina-reading-well: 720px;
+
+  /* ---------- 玻璃拟态 3 层 ---------- */
+  --glass-blur-card: 40px;
+  --glass-blur-panel: 12px;
+  --glass-bg-card: rgba(255, 255, 255, 0.7);
+  --glass-bg-panel: rgba(250, 248, 255, 0.8);
+  --glass-bg-header: rgba(250, 248, 255, 0.94);
+  --glass-border-card: rgba(218, 226, 253, 0.5);
+  --glass-border-panel: rgba(255, 255, 255, 0.4);
+
+  /* ---------- Elevation Shadow ---------- */
+  --shadow-card-rest: 0 1px 3px rgba(19, 27, 46, 0.04);
+  --shadow-card-hover: 0 12px 24px -8px rgba(19, 27, 46, 0.08);
+  --shadow-featured: 0 20px 40px -16px rgba(19, 27, 46, 0.12);
+  --shadow-dock: 0 25px 50px -12px rgba(19, 27, 46, 0.25);
+
+  /* ---------- 字体（M3 通过 @fontsource 加载） ---------- */
+  --font-header: 'Geist', system-ui, -apple-system, sans-serif;
+  --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-code: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+}
+
+/* ============================================================
+ * 深色模式 · [data-theme="dark"] 覆盖（F2.8 新增）
+ * 只覆盖有颜色语义的变量；圆角/间距/字体/玻璃模糊半径等形状类变量跨主题不变。
+ * document.documentElement 的 data-theme 由 BaseLayout 里的 FOUC 防护
+ * inline script 在首屏渲染前设好，theme-toggle-client.ts 负责后续切换。
+ * ============================================================ */
+[data-theme='dark'] {
+  /* Lumina 9 标准色 */
+  --color-light: #0b0e1a;
+  --color-lightgray: #2a2d42;
+  --color-gray: #8b8fa8;
+  --color-darkgray: #c3c5d9;
+  --color-dark: #eef0ff;
+  --color-secondary: #6c93ff;
+  --color-tertiary: #89a8ff;
+  --color-highlight: rgba(108, 147, 255, 0.16);
+  --color-text-highlight: #6cf8bb66;
+
+  /* Surface 语义分层（M3 dark：整体压暗，elevation 越高越亮的相对关系不变） */
+  --surface-container-lowest: #05070d;
+  --surface-container-low: #0f1320;
+  --surface-container: #151a2c;
+  --surface-container-high: #1c2238;
+  --surface-container-highest: #242b45;
+  --surface-dim: #05070d;
+  --surface-variant: #2a3050;
+  --surface-tint: #89a8ff;
+  --inverse-surface: #eef0ff;
+  --inverse-on-surface: #131b2e;
+  --inverse-primary: #003ec7;
+
+  /* Primary 家族（Electric Blue） */
+  --primary-container: #26418a;
+  --on-primary: #dfe3ff;
+  --on-primary-container: #dde1ff;
+  --primary-fixed: #26418a;
+  --primary-fixed-dim: #1a2f66;
+
+  /* 🟢 Emerald · AI 专用（accent 本身够亮，跨主题基本沿用） */
+  --ai-accent-dark: #3fbf8f;
+
+  /* Tertiary · Warm Red 强调 */
+  --tertiary-accent: #ffb4a1;
+  --tertiary-accent-light: #952200;
+  --tertiary-container: #ff8a65;
+
+  /* 玻璃拟态 3 层（白底玻璃 → 暗底玻璃） */
+  --glass-bg-card: rgba(21, 26, 44, 0.7);
+  --glass-bg-panel: rgba(15, 19, 32, 0.8);
+  --glass-bg-header: rgba(15, 19, 32, 0.94);
+  --glass-border-card: rgba(42, 48, 80, 0.5);
+  --glass-border-panel: rgba(255, 255, 255, 0.08);
+
+  /* Elevation Shadow（暗底阴影本来就不明显，纯黑加深不透明度） */
+  --shadow-card-rest: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-card-hover: 0 12px 24px -8px rgba(0, 0, 0, 0.4);
+  --shadow-featured: 0 20px 40px -16px rgba(0, 0, 0, 0.5);
+  --shadow-dock: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+}
+
+/* ============================================================
+ * Utility Classes（跨屏共识）
+ * ============================================================ */
+
+/* 全站选中态 · Emerald */
+::selection {
+  background-color: var(--ai-selection-bg);
+  color: var(--ai-selection-fg);
+}
+
+/* Lumina 卡片（玻璃拟态 · Featured/Intelligence 通用） */
+.lumina-card {
+  background: var(--glass-bg-card);
+  backdrop-filter: blur(var(--glass-blur-card));
+  -webkit-backdrop-filter: blur(var(--glass-blur-card));
+  border: 1px solid var(--glass-border-card);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-card-rest);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.lumina-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-2px);
+}
+
+/* Lumina 面板（Dock / Popover 用薄玻璃） */
+.lumina-panel {
+  background: var(--glass-bg-panel);
+  backdrop-filter: blur(var(--glass-blur-panel));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel));
+  border: 1px solid var(--glass-border-panel);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-dock);
+}
+
+/* AI accent bar（左侧 Emerald 4px 竖条，标记 AI 生成内容） */
+.lumina-ai-bar {
+  border-left: 4px solid var(--ai-accent);
+  padding-left: 1rem;
+}
+
+/* 主容器（1280 max） */
+.lumina-container {
+  max-width: var(--lumina-container-max);
+  margin-inline: auto;
+  padding-inline: var(--lumina-margin-edge);
+}
+
+/* 中央阅读区（720 max，Sources 中栏 + 长文用） */
+.lumina-reading-well {
+  max-width: var(--lumina-reading-well);
+  margin-inline: auto;
+}
+
+/* Chip pill（横向徽章） */
+.lumina-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--surface-container-high);
+  color: var(--color-dark);
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-family: var(--font-header);
+  letter-spacing: 0.05em;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+
+.lumina-chip:hover {
+  background: var(--surface-container-highest);
+}
+
+/* Eyebrow 小标签（Hero 上方） */
+.lumina-eyebrow {
+  font-family: var(--font-header);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--color-secondary);
+}
+
+/* 断链视觉（wikilink target 不存在） */
+a.wikilink.broken {
+  color: var(--tertiary-accent);
+  text-decoration: line-through wavy var(--tertiary-accent-light);
+}
+
+/* Wikilink 默认样式（内部链接） */
+a.wikilink {
+  color: var(--color-secondary);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--color-secondary);
+  transition: background 0.15s ease;
+  padding-bottom: 1px;
+}
+
+a.wikilink:hover {
+  background: var(--color-highlight);
+}

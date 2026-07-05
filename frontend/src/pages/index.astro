@@ -1,0 +1,24 @@
+---
+// AInews · / landing = 最新一天日报（内容与 /daily/{latest}/ 100% 相同）
+// 走同一个 DailyPageContent 组件，canonical 指向 /daily/{latest}/
+export const prerender = false
+
+import { getLiveCollection } from 'astro:content'
+import BaseLayout from '../layouts/BaseLayout.astro'
+import DailyPageContent from '../components/content/DailyPageContent.astro'
+
+const { entries, error } = await getLiveCollection('daily')
+if (error) throw error
+const all = [...(entries ?? [])].sort((a, b) => b.id.localeCompare(a.id))
+const latest = all[0]
+if (!latest) throw new Error('No daily entries — documents 表暂无 daily 记录')
+const canonical = new URL(`/daily/${latest.id}/`, Astro.site ?? 'http://localhost:4321').toString()
+---
+
+<BaseLayout
+  title="AInews"
+  description={`AI 资讯自动化 vault · 最新简报 ${latest.id}`}
+  canonical={canonical}
+>
+  <DailyPageContent entry={latest} />
+</BaseLayout>

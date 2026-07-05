@@ -1,0 +1,142 @@
+---
+// AInews · Originals 列表 · 3-col magazine 布局
+export const prerender = false
+
+import { getLiveCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import AIBadge from '../../components/cards/AIBadge.astro'
+
+const { entries, error } = await getLiveCollection('originals')
+if (error) throw error
+
+const all = [...(entries ?? [])].sort(
+  (a, b) => new Date(b.data.docDate as string).getTime() - new Date(a.data.docDate as string).getTime(),
+)
+
+const sourceSet = new Set(all.map((e) => e.data.source_name))
+const eyebrow = `${all.length} 篇 · ${sourceSet.size} 源`
+---
+
+<BaseLayout
+  title="Sources · 原文归档"
+  description="AInews 原文全文离线归档 · 含 AI 中文翻译"
+>
+  <HeroSection
+    eyebrow={eyebrow}
+    title="原文归档"
+    subtitle="原文全文与中文翻译完整收录，即使原始链接失效，内容依然可读"
+  />
+
+  <div class="originals-magazine">
+    {all.map((entry) => {
+      const dateLabel = (entry.data.docDate as string | null) ?? ''
+      const wordCount = (entry.data.word_count as number | null) ?? 0
+      const sourceName = entry.data.source_name as string
+      return (
+        <a href={`/originals/${entry.id}/`} class="orig-card">
+          <div class="orig-card-header">
+            <span class="orig-card-source">
+              <span class="orig-card-source-avatar">
+                {sourceName.charAt(0).toUpperCase()}
+              </span>
+              {sourceName}
+            </span>
+            <AIBadge variant="translation" />
+          </div>
+          <h3 class="orig-card-title">{entry.data.title}</h3>
+          <div class="orig-card-meta">
+            <span>{dateLabel}</span>
+            <span class="orig-card-dot"></span>
+            <span>{wordCount.toLocaleString()} 字</span>
+          </div>
+        </a>
+      )
+    })}
+  </div>
+</BaseLayout>
+
+<style>
+  .originals-magazine {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+  .orig-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    padding: 1.5rem;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    text-decoration: none;
+    color: var(--color-dark);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .orig-card:hover {
+    box-shadow: var(--shadow-card-hover);
+    transform: translateY(-2px);
+  }
+  .orig-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .orig-card-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    color: var(--color-darkgray);
+  }
+  .orig-card-source-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+    color: var(--color-light);
+    border-radius: 50%;
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .orig-card-title {
+    font-family: var(--font-header);
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0;
+    color: var(--color-dark);
+  }
+  .orig-card-otitle {
+    margin: 0;
+    color: var(--color-gray);
+    font-size: 0.8rem;
+    font-style: italic;
+    line-height: 1.45;
+  }
+  .orig-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: auto;
+    font-family: var(--font-header);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: var(--color-gray);
+    text-transform: uppercase;
+  }
+  .orig-card-dot {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--color-lightgray);
+  }
+</style>

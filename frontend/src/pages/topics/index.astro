@@ -1,0 +1,149 @@
+---
+// AInews · Topics 列表 · 3-col grid
+// 每个 topic 一张 FeaturedCard 风格卡（含 entry_total + 最近活动）
+export const prerender = false
+
+import { getLiveCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+
+const { entries, error } = await getLiveCollection('topics')
+if (error) throw error
+
+// 按 last_updated_date desc 排序
+const all = [...(entries ?? [])].sort(
+  (a, b) => new Date(b.data.last_updated_date as string).getTime() - new Date(a.data.last_updated_date as string).getTime(),
+)
+
+// 图标映射（topic slug → Material Symbols name）
+const TOPIC_ICONS: Record<string, string> = {
+  'model-releases': 'rocket_launch',
+  'applications': 'apps',
+  'research-papers': 'article',
+  'infra-hardware': 'memory',
+  'agents': 'smart_toy',
+  'safety-alignment': 'shield',
+  'funding-investment': 'trending_up',
+  'policy-regulation': 'gavel',
+  'industry-moves': 'business',
+  'multimodal': 'blur_on',
+  'benchmarks': 'query_stats',
+}
+
+const eyebrow = `${all.length} 主题 · 更新至 ${all[0] ? all[0].data.last_updated_date : '—'}`
+---
+
+<BaseLayout
+  title="Topics · 主题聚合"
+  description="AI 主题按类别聚合 · 每主题包含累计条目 + 时间线"
+>
+  <HeroSection
+    eyebrow={eyebrow}
+    title="主题聚合"
+    subtitle="追踪 AI 各领域的持续动态，看一个主题如何随时间演进"
+  />
+
+  <div class="topics-grid">
+    {all.map((entry) => {
+      const icon = TOPIC_ICONS[entry.id] ?? 'label'
+      const updated = entry.data.last_updated_date as string
+      return (
+        <a href={`/topics/${entry.id}/`} class="topic-card">
+          <div class="topic-card-icon">
+            <span class="material-symbols-outlined">{icon}</span>
+          </div>
+          <div class="topic-card-body">
+            <h3 class="topic-card-title">#{entry.id}</h3>
+            <div class="topic-card-meta">
+              <span>{entry.data.article_count} 条</span>
+              <span class="topic-card-dot"></span>
+              <span>更新 {updated}</span>
+            </div>
+          </div>
+          <span class="material-symbols-outlined topic-card-arrow">arrow_outward</span>
+        </a>
+      )
+    })}
+  </div>
+</BaseLayout>
+
+<style>
+  .topics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+  .topic-card {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    text-decoration: none;
+    color: var(--color-dark);
+    transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  }
+  .topic-card:hover {
+    box-shadow: var(--shadow-card-hover);
+    border-color: var(--color-secondary);
+    transform: translateY(-2px);
+  }
+  .topic-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+    color: var(--color-light);
+    border-radius: var(--radius-lg);
+    flex-shrink: 0;
+  }
+  .topic-card-icon .material-symbols-outlined {
+    font-size: 1.35rem;
+    font-variation-settings: 'FILL' 1;
+  }
+  .topic-card-body {
+    flex: 1;
+    min-width: 0;
+  }
+  .topic-card-title {
+    font-family: var(--font-header);
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem;
+    color: var(--color-dark);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .topic-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-header);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: var(--color-gray);
+    text-transform: uppercase;
+  }
+  .topic-card-dot {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--color-lightgray);
+  }
+  .topic-card-arrow {
+    font-size: 1.1rem;
+    color: var(--color-gray);
+    transition: color 0.15s ease, transform 0.15s ease;
+  }
+  .topic-card:hover .topic-card-arrow {
+    color: var(--color-secondary);
+    transform: translate(2px, -2px);
+  }
+</style>

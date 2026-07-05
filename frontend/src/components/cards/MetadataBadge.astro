@@ -1,0 +1,54 @@
+---
+// AInews · MetadataBadge · 元数据行（source/date/word_count/lang）
+interface Item {
+  icon?: string
+  label: string
+}
+interface Props {
+  items: Item[]
+  variant?: 'inline' | 'stack' // stack = 列（Sources 左栏）· inline = 横排
+}
+const { items, variant = 'inline' } = Astro.props
+---
+
+<div class={`lumina-meta ${variant}`}>
+  {items.map((item) => (
+    <span class="lumina-meta-item">
+      {item.icon && (
+        <span class="material-symbols-outlined lumina-meta-icon" aria-hidden="true">
+          {item.icon}
+        </span>
+      )}
+      <span>{item.label}</span>
+    </span>
+  ))}
+</div>
+
+<style>
+  .lumina-meta {
+    display: flex;
+    gap: 1rem;
+    color: var(--color-gray);
+    font-family: var(--font-header);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+  }
+  .lumina-meta.stack {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .lumina-meta.inline {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .lumina-meta-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+  }
+  .lumina-meta-icon {
+    font-size: 0.95rem;
+    color: var(--color-secondary);
+  }
+</style>

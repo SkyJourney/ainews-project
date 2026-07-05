@@ -1,0 +1,97 @@
+---
+// AInews · 基础 Layout · 全站唯一 HTML shell
+// 结构：<html> → <head>（meta + ClientRouter + fonts + global css）→ <body>（Header + slot + Dock）
+// 所有路由都用此 Layout（详情页可用 ArticleLayout 扩展）
+
+import '../styles/global.css'
+// 自托管字体（替代 Google Fonts CDN，见 F2.8）
+import '@fontsource/geist-sans/400.css'
+import '@fontsource/geist-sans/500.css'
+import '@fontsource/geist-sans/600.css'
+import '@fontsource/geist-sans/700.css'
+import '@fontsource/inter/400.css'
+import '@fontsource/inter/500.css'
+import '@fontsource/inter/600.css'
+import '@fontsource/ibm-plex-mono/400.css'
+import '@fontsource/ibm-plex-mono/500.css'
+import { ClientRouter } from 'astro:transitions'
+import LuminaHeader from '../components/shell/LuminaHeader.astro'
+import LuminaDock from '../components/shell/LuminaDock.tsx'
+
+interface Props {
+  title: string
+  description?: string
+  canonical?: string  // 用于 / landing 指向 /daily/{latest}/
+  ogImage?: string
+}
+
+const {
+  title,
+  description = 'AInews · AI 资讯自动化 vault',
+  canonical,
+  ogImage,
+} = Astro.props
+
+const fullTitle = title === 'AInews' ? title : `${title} · AInews`
+const siteUrl = new URL(Astro.url.pathname, Astro.site ?? 'http://localhost:4321').toString()
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+
+    <!-- 深色模式 FOUC 防护：必须在任何样式生效前同步执行，赶在首帧绘制前定好 data-theme -->
+    <script is:inline>
+      (function () {
+        var stored = localStorage.getItem('ainews-theme')
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        document.documentElement.dataset.theme = theme
+      })()
+    </script>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+
+    <!-- Canonical + OG -->
+    {canonical && <link rel="canonical" href={canonical} />}
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={siteUrl} />
+    <meta property="og:type" content="website" />
+    {ogImage && <meta property="og:image" content={ogImage} />}
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Astro ClientRouter · SPA 感 + 淡入 view transitions -->
+    <ClientRouter />
+  </head>
+  <body>
+    <LuminaHeader />
+    <main class="lumina-main">
+      <slot />
+    </main>
+    <LuminaDock client:load />
+
+    <script>
+      import '../lib/wikilink-preview-client.ts'
+      import '../lib/theme-toggle-client.ts'
+    </script>
+
+    <style>
+      .lumina-main {
+        max-width: var(--lumina-container-max);
+        margin-inline: auto;
+        padding-inline: var(--lumina-margin-edge);
+        padding-block: 2rem;
+        min-height: 60vh;
+      }
+      @media (max-width: 768px) {
+        .lumina-main {
+          padding-inline: 1rem;
+        }
+      }
+    </style>
+  </body>
+</html>

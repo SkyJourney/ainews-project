@@ -1,0 +1,126 @@
+---
+// AInews · LuminaBacklinks · 按内容类型分栏的反向链接
+// 输入：postgres-loader.ts 查 links 表得到的 backlinks 数组 [{ fromId, docType, title }]
+// M6 起改查 Postgres links 表，不再是旧版 vaultLoader 注入的内存反向 map
+import { DOC_TYPE_LABEL, DOC_TYPE_SEGMENT, type DocType } from '../../lib/doc-type'
+
+interface Backlink {
+  fromId: string
+  docType: string
+  title: string | null
+}
+
+interface Props {
+  backlinks: Backlink[]
+}
+
+const { backlinks } = Astro.props
+
+// 分组：按 docType 归类，显示顺序 = Daily → Zettel → Original → Topic → Digest
+const ORDER: DocType[] = ['daily', 'zettel', 'original', 'topic', 'digest']
+
+const bins = new Map<string, Backlink[]>()
+for (const bl of backlinks) {
+  if (!bins.has(bl.docType)) bins.set(bl.docType, [])
+  bins.get(bl.docType)!.push(bl)
+}
+
+const groups = ORDER.filter((d) => bins.has(d)).map((d) => ({
+  docType: d,
+  label: DOC_TYPE_LABEL[d],
+  segment: DOC_TYPE_SEGMENT[d],
+  items: bins.get(d)!,
+}))
+
+const total = backlinks.length
+---
+
+{total === 0 ? (
+  <aside class="lumina-backlinks lumina-backlinks-empty">
+    <h3 class="lumina-backlinks-title">
+      <span class="material-symbols-outlined">arrow_upward</span>
+      反向链接
+    </h3>
+    <p class="lumina-backlinks-empty-text">此内容暂无被引用</p>
+  </aside>
+) : (
+  <aside class="lumina-backlinks">
+    <h3 class="lumina-backlinks-title">
+      <span class="material-symbols-outlined">arrow_upward</span>
+      反向链接
+      <span class="lumina-backlinks-count">{total}</span>
+    </h3>
+    {groups.map((g) => (
+      <section class="lumina-backlinks-group">
+        <div class="lumina-backlinks-group-label">{g.label}</div>
+        <div class="lumina-backlinks-chips">
+          {g.items.map((bl) => (
+            <a href={`/${g.segment}/${bl.fromId}/`} class="lumina-chip">
+              {bl.title ?? bl.fromId}
+            </a>
+          ))}
+        </div>
+      </section>
+    ))}
+  </aside>
+)}
+
+<style>
+  .lumina-backlinks {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    background: var(--surface-container-low);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    margin-top: 3rem;
+  }
+  .lumina-backlinks-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-header);
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-darkgray);
+    margin: 0;
+  }
+  .lumina-backlinks-title .material-symbols-outlined {
+    font-size: 1.15rem;
+    color: var(--color-secondary);
+  }
+  .lumina-backlinks-count {
+    background: var(--surface-container);
+    color: var(--color-secondary);
+    padding: 0.1rem 0.5rem;
+    border-radius: var(--radius-full);
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+  .lumina-backlinks-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .lumina-backlinks-group-label {
+    font-family: var(--font-header);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-gray);
+  }
+  .lumina-backlinks-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .lumina-backlinks-empty-text {
+    margin: 0;
+    color: var(--color-gray);
+    font-size: 0.85rem;
+    font-style: italic;
+  }
+</style>

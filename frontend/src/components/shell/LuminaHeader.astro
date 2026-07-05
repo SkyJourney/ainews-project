@@ -1,0 +1,84 @@
+---
+// AInews · 顶栏
+// 布局：Logo 左 · 搜索按钮 + 主题切换 右
+// 视觉：薄玻璃遮罩（--glass-bg-header + blur）。专属 token（非 --glass-bg-panel），
+// 透明度比浮层玻璃更低——顶栏常驻滚动区，需要更强遮罩盖住内容，避免移动端窄视口下"透视"叠加
+import Logo from './Logo.astro'
+import GlassSearchBar from './GlassSearchBar.tsx'
+// Material Symbols Outlined 自托管（替代 Google Fonts CDN，见 F2.8）
+import 'material-symbols/outlined.css'
+---
+
+<header class="lumina-header">
+  <div class="lumina-header-inner">
+    <div class="lumina-header-left">
+      <Logo />
+    </div>
+    <nav class="lumina-header-right" aria-label="全局操作">
+      <GlassSearchBar client:idle />
+      <button class="lumina-header-btn" data-theme-toggle aria-label="切换深色/浅色模式">
+        <span class="material-symbols-outlined">dark_mode</span>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .lumina-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    padding: 0.75rem 0;
+    background: var(--glass-bg-header);
+    backdrop-filter: blur(var(--glass-blur-panel));
+    -webkit-backdrop-filter: blur(var(--glass-blur-panel));
+    border-bottom: 1px solid var(--glass-border-panel);
+  }
+
+  .lumina-header-inner {
+    max-width: var(--lumina-container-max);
+    margin-inline: auto;
+    padding-inline: var(--lumina-margin-edge);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .lumina-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .lumina-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .lumina-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-full);
+    color: var(--color-darkgray);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .lumina-header-btn:hover {
+    background: var(--surface-container-high);
+    color: var(--color-dark);
+  }
+
+  @media (max-width: 768px) {
+    .lumina-header-inner {
+      padding-inline: 1rem;
+    }
+  }
+</style>

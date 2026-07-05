@@ -1,0 +1,95 @@
+---
+// AInews · IntelligenceCard · 通用卡片（Daily/Zettel/Original 列表 + Daily 内嵌用）
+// 视觉：Lumina card 玻璃拟态 + 顶部 badge slot + 底部 meta
+interface Props {
+  href: string
+  title: string
+  eyebrow?: string
+  summary?: string
+  ai?: boolean
+  metaLine?: string // 底部单行 meta（例如 "70 条 · 9 源"）
+  variant?: 'default' | 'compact'
+}
+const { href, title, eyebrow, summary, ai = false, metaLine, variant = 'default' } = Astro.props
+---
+
+<a href={href} class={`lumina-icard ${ai ? 'is-ai' : ''} ${variant}`}>
+  {(eyebrow || ai) && (
+    <div class="lumina-icard-top">
+      {eyebrow && <span class="lumina-eyebrow">{eyebrow}</span>}
+      {ai && <span class="lumina-icard-ai-dot" aria-label="AI 生成"></span>}
+    </div>
+  )}
+  <h3 class="lumina-icard-title">{title}</h3>
+  {summary && <p class="lumina-icard-summary">{summary}</p>}
+  {metaLine && <div class="lumina-icard-meta">{metaLine}</div>}
+</a>
+
+<style>
+  .lumina-icard {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1.5rem;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    text-decoration: none;
+    color: var(--color-dark);
+    transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+  }
+  .lumina-icard.compact {
+    padding: 1rem 1.25rem;
+    gap: 0.5rem;
+  }
+  .lumina-icard:hover {
+    box-shadow: var(--shadow-card-hover);
+    border-color: var(--color-secondary);
+    transform: translateY(-2px);
+  }
+  .lumina-icard.is-ai {
+    border-left: 3px solid var(--ai-accent);
+  }
+  .lumina-icard-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .lumina-icard-ai-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--ai-accent);
+    box-shadow: 0 0 6px var(--ai-accent);
+  }
+  .lumina-icard-title {
+    font-family: var(--font-header);
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0;
+    color: var(--color-dark);
+  }
+  .lumina-icard.compact .lumina-icard-title {
+    font-size: 0.95rem;
+  }
+  .lumina-icard-summary {
+    margin: 0;
+    color: var(--color-darkgray);
+    font-size: 0.9rem;
+    line-height: 1.55;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .lumina-icard-meta {
+    margin-top: auto;
+    font-family: var(--font-header);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: var(--color-gray);
+    text-transform: uppercase;
+  }
+</style>

@@ -1,0 +1,85 @@
+---
+// AInews · EmptyState · 空态占位（Deep-Dives / 未来分类空目录）
+interface Props {
+  icon?: string
+  title: string
+  description: string
+  ctaLabel?: string
+  ctaHref?: string
+}
+const { icon = 'auto_stories', title, description, ctaLabel, ctaHref } = Astro.props
+---
+
+<section class="lumina-empty">
+  <div class="lumina-empty-icon" aria-hidden="true">
+    <span class="material-symbols-outlined">{icon}</span>
+  </div>
+  <h2 class="lumina-empty-title">{title}</h2>
+  <p class="lumina-empty-description">{description}</p>
+  {ctaHref && ctaLabel && (
+    <a href={ctaHref} class="lumina-empty-cta">
+      {ctaLabel}
+      <span class="material-symbols-outlined" style="font-size: 1.1rem;">arrow_forward</span>
+    </a>
+  )}
+</section>
+
+<style>
+  .lumina-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 5rem 2rem;
+    background: var(--surface-container-low);
+    border: 1px dashed var(--color-lightgray);
+    border-radius: var(--radius-2xl);
+  }
+  .lumina-empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 4rem;
+    height: 4rem;
+    background: var(--surface-container);
+    border-radius: var(--radius-full);
+    color: var(--color-secondary);
+    margin-bottom: 1.5rem;
+  }
+  .lumina-empty-icon .material-symbols-outlined {
+    font-size: 2.25rem;
+    font-variation-settings: 'FILL' 1;
+  }
+  .lumina-empty-title {
+    font-family: var(--font-header);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0 0 0.75rem;
+    color: var(--color-dark);
+  }
+  .lumina-empty-description {
+    max-width: 480px;
+    color: var(--color-darkgray);
+    line-height: 1.65;
+    margin: 0 0 2rem;
+  }
+  .lumina-empty-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.65rem 1.5rem;
+    background: var(--color-dark);
+    color: var(--color-light);
+    border-radius: var(--radius-full);
+    font-family: var(--font-header);
+    font-weight: 500;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .lumina-empty-cta:hover {
+    background: var(--color-secondary);
+    color: var(--color-light);
+    transform: translateY(-1px);
+  }
+</style>

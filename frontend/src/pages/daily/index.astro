@@ -1,0 +1,108 @@
+---
+// AInews · Daily 列表 · Timeline 布局
+// 左 sticky 月份 · 右每日 IntelligenceCard
+export const prerender = false
+
+import { getLiveCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
+
+const { entries, error } = await getLiveCollection('daily')
+if (error) throw error
+
+// 按日期 desc 排序（daily 的 id 本身就是 YYYY-MM-DD，字符串比较即可）
+const all = [...(entries ?? [])].sort((a, b) => b.id.localeCompare(a.id))
+
+// 按 YYYY-MM 分组（同月内保持 desc）
+type Group = { key: string; label: string; entries: typeof all }
+const groupsMap = new Map<string, Group>()
+for (const entry of all) {
+  const [year, month] = entry.id.split('-')
+  const key = `${year}-${month}`
+  const label = `${year} · ${month} 月`
+  if (!groupsMap.has(key)) groupsMap.set(key, { key, label, entries: [] })
+  groupsMap.get(key)!.entries.push(entry)
+}
+const groups = Array.from(groupsMap.values())
+
+// 统计
+const totalTopics = new Set(all.flatMap((e) => (e.data.topics as string[]) ?? [])).size
+const eyebrow = `${all.length} 篇 · ${totalTopics} 主题`
+---
+
+<BaseLayout
+  title="Daily · 每日简报"
+  description="AInews 每日 AI 资讯简报 · 按日期倒序时间线"
+>
+  <HeroSection
+    eyebrow={eyebrow}
+    title="每日简报"
+    subtitle="每天一份 AI 行业速览，重要发布、研究进展与行业信号一目了然"
+  />
+
+  <div class="daily-timeline">
+    {groups.map((g) => (
+      <section class="daily-tl-group">
+        <aside class="daily-tl-month">{g.label}</aside>
+        <div class="daily-tl-entries">
+          {g.entries.map((entry) => {
+            const dateLabel = entry.id
+            const topicList = (entry.data.topics as string[]) ?? []
+            const topics = topicList.slice(0, 4).join(' · ')
+            const stats = (entry.data.stats as Record<string, number>) ?? {}
+            const meta = `${stats.articles_processed ?? 0} 条 · ${topicList.length} 主题`
+            return (
+              <IntelligenceCard
+                href={`/daily/${entry.id}/`}
+                eyebrow={dateLabel}
+                title={`AI 资讯日报 ${dateLabel}`}
+                summary={topics}
+                metaLine={meta}
+                ai={true}
+              />
+            )
+          })}
+        </div>
+      </section>
+    ))}
+  </div>
+</BaseLayout>
+
+<style>
+  .daily-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+    margin-top: 2rem;
+  }
+  .daily-tl-group {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 2rem;
+  }
+  .daily-tl-month {
+    position: sticky;
+    top: 5rem;
+    height: fit-content;
+    font-family: var(--font-header);
+    font-size: 0.85rem;
+    letter-spacing: 0.1em;
+    color: var(--color-secondary);
+    text-transform: uppercase;
+    padding-top: 0.15rem;
+  }
+  .daily-tl-entries {
+    display: grid;
+    gap: 1rem;
+  }
+  @media (max-width: 768px) {
+    .daily-tl-group {
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
+    .daily-tl-month {
+      position: static;
+    }
+  }
+</style>

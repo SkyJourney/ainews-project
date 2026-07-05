@@ -1,0 +1,52 @@
+---
+// AInews · 顶栏 Logo
+// 点击回 /（= 最新日报页）
+// 视觉：文字 mark + Emerald 圆点强调
+---
+
+<a href="/" class="lumina-logo" aria-label="AInews · 回到首页">
+  <span class="lumina-logo-mark">AI</span>
+  <span class="lumina-logo-dot" aria-hidden="true"></span>
+  <span class="lumina-logo-text">news</span>
+</a>
+
+<style>
+  .lumina-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-family: var(--font-header);
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--color-dark);
+    text-decoration: none;
+    padding: 0.35rem 0.5rem;
+    border-radius: var(--radius-default);
+    transition: transform 0.15s ease;
+  }
+
+  .lumina-logo:hover {
+    color: var(--color-dark);
+    transform: translateY(-1px);
+  }
+
+  .lumina-logo-mark {
+    background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .lumina-logo-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--ai-accent);
+    box-shadow: 0 0 8px var(--ai-accent);
+  }
+
+  .lumina-logo-text {
+    color: var(--color-dark);
+  }
+</style>

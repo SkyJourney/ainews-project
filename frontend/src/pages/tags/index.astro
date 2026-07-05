@@ -1,0 +1,36 @@
+---
+// AInews · Tags 列表（M6 新增，旧前端标签只是不可点击的展示 chip，从未有过浏览/过滤功能）
+export const prerender = false
+
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import { fetchAllTagsWithCounts } from '../../lib/db'
+
+const tags = await fetchAllTagsWithCounts()
+const eyebrow = `${tags.length} 个标签`
+---
+
+<BaseLayout title="Tags · 标签" description="AInews 全部标签浏览，按条目数排序">
+  <HeroSection eyebrow={eyebrow} title="标签" subtitle="按技术领域/产品公司/事件类型/来源质量四个维度打标，点击浏览同标签下的全部内容" />
+
+  <div class="tag-cloud">
+    {tags.map((t) => (
+      <a href={`/tags/${encodeURIComponent(t.tag)}/`} class="lumina-chip tag-cloud-chip">
+        #{t.tag} <span class="tag-cloud-count">{t.count}</span>
+      </a>
+    ))}
+  </div>
+</BaseLayout>
+
+<style>
+  .tag-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 2rem;
+  }
+  .tag-cloud-count {
+    opacity: 0.6;
+    font-size: 0.85em;
+  }
+</style>

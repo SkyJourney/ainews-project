@@ -1,0 +1,48 @@
+---
+// AInews · Topic 详情页 /topics/{slug}/
+// Hero + entry_total + 时间线聚合内容 + 反查相关 Zettel/Original
+export const prerender = false
+
+import { getLiveEntry, render } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import LuminaBacklinks from '../../components/enhance/LuminaBacklinks.astro'
+
+const { slug } = Astro.params
+const { entry, error } = await getLiveEntry('topics', slug!)
+if (error || !entry) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+const { Content } = await render(entry)
+
+const updated = entry.data.last_updated_date as string
+const eyebrow = `${entry.data.article_count} 条 · 更新 ${updated}`
+---
+
+<BaseLayout
+  title={`#${entry.id} · 主题聚合`}
+  description={`AI 主题 ${entry.id} · ${entry.data.article_count} 条时间线`}
+>
+  <article class="topic-detail">
+    <HeroSection
+      eyebrow={eyebrow}
+      title={`#${entry.id}`}
+      subtitle="按日期倒序聚合该主题的所有条目"
+    />
+
+    <div class="topic-detail-body lumina-reading-well">
+      <Content />
+    </div>
+
+    <LuminaBacklinks backlinks={entry.data.backlinks ?? []} />
+  </article>
+</BaseLayout>
+
+<style>
+  .topic-detail { padding-block: 1rem 4rem; }
+  .topic-detail-body {
+    font-size: 1rem;
+    line-height: 1.75;
+    margin-top: 2rem;
+  }
+</style>

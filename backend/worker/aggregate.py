@@ -259,8 +259,10 @@ def _decide_zettel(index_entry: dict | None, slug: str, used_ids: set[str]) -> d
 
 def _build_original_record(article: dict, original_id: str, zettel_id: str | None, decision: dict, tags: list[str]) -> dict:
     title = article["translated_title"] or article["fetched_title"]
-    body = article["translated_summary"] or article["original_text"] or ""
-    body_md = f"# {title}\n\n{body}"
+    # 不在 body_md 里重复拼 "# {title}"：title 已经是独立字段（documents.title 列 +
+    # frontmatter.title），前端详情页会单独渲染一次；重复拼会导致页面标题渲染两遍，
+    # 对 original 类型还会跟原文本身自带的标题结构叠成三层 H1（真实批次验证时发现）。
+    body_md = article["translated_summary"] or article["original_text"] or ""
     frontmatter = {
         "title": title,
         "doc_type": "original",
@@ -289,7 +291,8 @@ def _build_original_record(article: dict, original_id: str, zettel_id: str | Non
 
 def _build_zettel_record(article: dict, zettel_id: str, original_id: str, decision: dict, tags: list[str]) -> dict:
     title = article["translated_title"] or article["fetched_title"]
-    body_md = f"# {title}\n\n{article['gist']}\n\n原文归档：[[{original_id}]]"
+    # 同 _build_original_record：title 已是独立字段，不在 body_md 里重复拼标题
+    body_md = f"{article['gist']}\n\n原文归档：[[{original_id}]]"
     frontmatter = {
         "title": title,
         "doc_type": "zettel",
@@ -354,7 +357,8 @@ def _build_topic_record(slug: str, entries: list[tuple[dict, str | None, str]], 
 
     if existing is None:
         title = _humanize_slug(slug)
-        body_md = f"# {title}\n\n{_topic_date_heading(doc_date)}\n\n" + "\n".join(entry_lines) + "\n"
+        # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
+        body_md = f"{_topic_date_heading(doc_date)}\n\n" + "\n".join(entry_lines) + "\n"
         frontmatter = {
             "title": title,
             "doc_type": "topic",
@@ -471,8 +475,8 @@ def _build_daily_record(
     stats = _compute_daily_stats(articles, decisions, per_article_ctx)
     stats_section = "## 本日数据统计\n\n" + "\n".join(f"- {k}：{v}" for k, v in stats.items())
 
+    # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
     body_md = (
-        f"# {today.isoformat()} AI 日报\n\n"
         "## TL;DR\n\n" + "\n".join(tldr_lines) + "\n\n"
         + recap_section
         + topic_sections + "\n\n"
@@ -489,7 +493,15 @@ def _build_daily_record(
         "doc_type": "daily",
         "title": title,
         "doc_date": today,
-        "frontmatter": {"title": title, "doc_type": "daily", "stats": stats},
+        "frontmatter": {
+            "title": title,
+            "doc_type": "daily",
+            "stats": stats,
+            # M6 前端需要：本日实际涉及的 topic slug 列表（渲染 chips）+ 昨日日报 id
+            # （渲染"昨日回顾"链接），都是已经计算过的值，只是之前没有写进 frontmatter。
+            "topics": sorted(groups),
+            "previous_daily": yesterday["id"] if yesterday else None,
+        },
         "body_md": body_md,
         "content_hash": _content_hash(body_md),
         "tags": [],
@@ -555,7 +567,8 @@ def _build_digest_entries(articles: list[dict]) -> list[dict]:
 def _build_digest_record(articles: list[dict], today: date) -> dict:
     entries = _build_digest_entries(articles)
     lines = [f"- **{e['title']}**（来源：{e['source_name']}）{e['blurb']} {e['url']}" for e in entries]
-    body_md = f"# {today.isoformat()} AI Digest\n\n" + "\n".join(lines) + "\n"
+    # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
+    body_md = "\n".join(lines) + "\n"
     title = f"{today.isoformat()} AI Digest"
     return {
         "doc_id": f"digest-{today.isoformat()}",

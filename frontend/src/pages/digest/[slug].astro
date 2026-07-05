@@ -1,0 +1,39 @@
+---
+// AInews · Digest 详情页 /digest/{digest-YYYY-MM-DD}/
+// 定位"可独立分享打印"：body_md 里没有 wikilink，不需要 LuminaBacklinks
+export const prerender = false
+
+import { getLiveEntry, render } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+
+const { slug } = Astro.params
+const { entry, error } = await getLiveEntry('digest', slug!)
+if (error || !entry) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+const { Content } = await render(entry)
+
+const dateLabel = entry.id.replace(/^digest-/, '')
+const entryCount = (entry.data.entry_count as number | null) ?? 0
+---
+
+<BaseLayout title={`AI Digest ${dateLabel}`} description={`AInews ${dateLabel} 摘要速览 · 共 ${entryCount} 条`}>
+  <article class="digest-detail">
+    <HeroSection eyebrow={`Digest · ${dateLabel}`} title={`AI Digest ${dateLabel}`} subtitle={`共 ${entryCount} 条`} large={true} />
+
+    <div class="digest-detail-body lumina-reading-well">
+      <Content />
+    </div>
+  </article>
+</BaseLayout>
+
+<style>
+  .digest-detail {
+    padding-block: 1rem 4rem;
+  }
+  .digest-detail-body {
+    font-size: 1rem;
+    line-height: 1.75;
+  }
+</style>

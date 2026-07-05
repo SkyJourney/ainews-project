@@ -1,0 +1,41 @@
+---
+// AInews · 单个标签下的全部文档 /tags/{tag}/（M6 新增）
+export const prerender = false
+
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
+import { fetchDocumentsByTag } from '../../lib/db'
+import { docHref, DOC_TYPE_LABEL, type DocType } from '../../lib/doc-type'
+
+const { tag } = Astro.params
+const docs = await fetchDocumentsByTag(decodeURIComponent(tag!))
+
+if (docs.length === 0) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+---
+
+<BaseLayout title={`#${tag} · 标签`} description={`AInews 标签 #${tag} 下的全部内容，共 ${docs.length} 条`}>
+  <HeroSection eyebrow={`标签 · ${docs.length} 条`} title={`#${tag}`} subtitle="按日期倒序" />
+
+  <div class="tag-doc-list">
+    {docs.map((d) => (
+      <IntelligenceCard
+        href={docHref(d.doc_type, d.id)}
+        eyebrow={DOC_TYPE_LABEL[d.doc_type as DocType] ?? d.doc_type}
+        title={d.title ?? d.id}
+        metaLine={d.doc_date ?? ''}
+      />
+    ))}
+  </div>
+</BaseLayout>
+
+<style>
+  .tag-doc-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+</style>

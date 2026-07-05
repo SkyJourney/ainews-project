@@ -1,0 +1,268 @@
+---
+// AInews · Original 详情页 · 3 栏 Reading Well
+// 左：AIBadge + MetadataBadge + SourceBadge · 中 720：Hero + 引用条 + <Content /> · 右：Backlinks + TOC
+export const prerender = false
+
+import { getLiveEntry, render } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import AIBadge from '../../components/cards/AIBadge.astro'
+import MetadataBadge from '../../components/cards/MetadataBadge.astro'
+import LuminaBacklinks from '../../components/enhance/LuminaBacklinks.astro'
+import ArticleProgress from '../../components/enhance/ArticleProgress.tsx'
+
+const { slug } = Astro.params
+const { entry, error } = await getLiveEntry('originals', slug!)
+if (error || !entry) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+const { Content, headings } = await render(entry)
+
+const publishedIso = (entry.data.docDate as string | null) ?? ''
+const sourceName = entry.data.source_name as string
+const wordCount = (entry.data.word_count as number | null) ?? 0
+const topicSlug = entry.data.topic_slug as string | undefined
+const relatedZettelId = entry.data.related_zettel_id as string | undefined
+const fallbackNotice = entry.data.fallback_notice as string | undefined
+
+const metaItems = [
+  { icon: 'today', label: publishedIso },
+  { icon: 'article', label: `${wordCount.toLocaleString()} 字` },
+]
+
+const initial = sourceName.charAt(0).toUpperCase()
+
+// 相关双链：M6 起 original 只有单一 topic_slug + 单一 related_zettel_id
+// （不再是老 schema 假设的一对多 related_zettels/related_topics 数组），
+// 反向发现"谁引用了我"改由下方 LuminaBacklinks（查 links 表）统一承担
+const relatedItems: Array<{ href: string; label: string; kind: string }> = []
+if (relatedZettelId) {
+  relatedItems.push({ href: `/zettel/${relatedZettelId}/`, label: relatedZettelId, kind: '原子笔记' })
+}
+if (topicSlug) {
+  relatedItems.push({ href: `/topics/${topicSlug}/`, label: topicSlug, kind: '主题' })
+}
+---
+
+<BaseLayout
+  title={entry.data.title}
+  description={entry.data.title}
+>
+  <article class="orig-detail">
+    <div class="orig-detail-layout">
+      <!-- 左栏 · sticky -->
+      <aside class="orig-detail-left">
+        <div class="orig-detail-badges">
+          <AIBadge variant="translation" />
+        </div>
+
+        <MetadataBadge items={metaItems} variant="stack" />
+
+        <a href={entry.data.source_url} target="_blank" rel="noopener" class="orig-detail-source">
+          <span class="orig-detail-source-avatar">{initial}</span>
+          <div class="orig-detail-source-body">
+            <div class="orig-detail-source-name">{sourceName}</div>
+            <div class="orig-detail-source-meta">前往原文 ↗</div>
+          </div>
+        </a>
+      </aside>
+
+      <!-- 中栏 720 · Reading Well -->
+      <div class="orig-detail-center">
+        <div class="orig-detail-eyebrow lumina-eyebrow">原文归档</div>
+        <h1 class="orig-detail-title">{entry.data.title}</h1>
+
+        <blockquote class="orig-detail-cite">
+          <div>
+            原文：<a href={entry.data.source_url as string} target="_blank" rel="noopener">{entry.data.title}</a> · {sourceName} · {publishedIso}
+          </div>
+          <div>
+            {wordCount.toLocaleString()} 字
+          </div>
+        </blockquote>
+
+        <div class="orig-detail-body">
+          <Content />
+        </div>
+
+        {fallbackNotice && (
+          <p class="orig-detail-fallback">⚠️ {fallbackNotice}</p>
+        )}
+      </div>
+
+      <!-- 右栏 -->
+      <aside class="orig-detail-right">
+        <ArticleProgress client:load />
+
+        {headings && headings.length > 0 && (
+          <nav class="orig-detail-toc">
+            <div class="lumina-eyebrow">目录</div>
+            <ul>
+              {headings.filter((h) => h.depth >= 2 && h.depth <= 3).map((h) => (
+                <li style={`padding-left: ${(h.depth - 2) * 0.75}rem;`}>
+                  <a href={`#${h.slug}`}>{h.text}</a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        )}
+
+        {relatedItems.length > 0 && (
+          <div class="orig-detail-related">
+            <div class="lumina-eyebrow">相关</div>
+            <ul>
+              {relatedItems.map((r) => (
+                <li>
+                  <a href={r.href}>{r.label}</a>
+                  <span class="orig-detail-related-kind">{r.kind}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <LuminaBacklinks backlinks={entry.data.backlinks ?? []} />
+      </aside>
+    </div>
+  </article>
+</BaseLayout>
+
+<style>
+  .orig-detail {
+    padding-block: 1rem 4rem;
+  }
+  .orig-detail-layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 720px) 260px;
+    gap: 3rem;
+    justify-content: center;
+  }
+  @media (max-width: 1200px) {
+    .orig-detail-layout {
+      grid-template-columns: 200px minmax(0, 1fr);
+    }
+    .orig-detail-right { grid-column: 1 / -1; }
+  }
+  @media (max-width: 900px) {
+    .orig-detail-layout {
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+  }
+
+  .orig-detail-left,
+  .orig-detail-right {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    position: sticky;
+    top: 5rem;
+    height: fit-content;
+  }
+  @media (max-width: 900px) {
+    .orig-detail-left,
+    .orig-detail-right { position: static; }
+  }
+
+  .orig-detail-badges { display: flex; gap: 0.5rem; }
+
+  .orig-detail-source {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-lg);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease;
+  }
+  .orig-detail-source:hover { border-color: var(--color-secondary); }
+  .orig-detail-source-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    background: linear-gradient(135deg, var(--color-secondary), var(--color-tertiary));
+    color: var(--color-light);
+    border-radius: var(--radius-default);
+    font-family: var(--font-header);
+    font-weight: 600;
+  }
+  .orig-detail-source-name {
+    font-family: var(--font-header);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .orig-detail-source-meta {
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: var(--color-gray);
+  }
+
+  .orig-detail-engine {
+    padding: 0.75rem 1rem;
+    background: var(--surface-container-low);
+    border-radius: var(--radius-lg);
+    font-size: 0.85rem;
+  }
+  .orig-detail-engine > .lumina-eyebrow { margin-bottom: 0.35rem; }
+
+  .orig-detail-eyebrow { margin-bottom: 0.5rem; }
+  .orig-detail-title {
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    margin: 0 0 0.5rem;
+  }
+  .orig-detail-otitle {
+    color: var(--color-gray);
+    font-style: italic;
+    margin: 0 0 1.5rem;
+  }
+  .orig-detail-cite {
+    margin: 1.5rem 0 2.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--surface-container-low);
+    border-left: 3px solid var(--color-secondary);
+    border-radius: 0 var(--radius-default) var(--radius-default) 0;
+    color: var(--color-darkgray);
+    font-size: 0.85rem;
+    font-style: normal;
+    line-height: 1.6;
+  }
+  .orig-detail-cite > div + div { margin-top: 0.25rem; }
+  .orig-detail-body { font-size: 1.05rem; line-height: 1.8; }
+  .orig-detail-fallback {
+    margin-top: 2rem;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 180, 161, 0.15);
+    border: 1px solid var(--tertiary-accent-light);
+    border-radius: var(--radius-lg);
+    color: var(--tertiary-accent);
+    font-size: 0.85rem;
+  }
+
+  .orig-detail-toc ul,
+  .orig-detail-related ul { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+  .orig-detail-toc li { margin-bottom: 0.35rem; font-size: 0.85rem; }
+  .orig-detail-toc a { color: var(--color-darkgray); }
+  .orig-detail-toc a:hover { color: var(--color-secondary); }
+  .orig-detail-related li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--color-lightgray);
+    font-size: 0.85rem;
+  }
+  .orig-detail-related-kind {
+    font-family: var(--font-header);
+    font-size: 0.65rem;
+    letter-spacing: 0.05em;
+    color: var(--color-gray);
+    text-transform: uppercase;
+  }
+</style>
