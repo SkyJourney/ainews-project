@@ -90,3 +90,11 @@ M1-M4 遗留的 `aggregate.py` 用"zettel"顶替了 04 §2.6 五类文档里"Ori
 
 - `aggregate_activity` 的返回值（含全部文档的完整 `body_md`）触发过 Temporal `PayloadSizeWarning`（真实批次达 1.16MB，警告阈值 512KB）——尚未达到 Temporal 的硬性消息大小上限，暂不处理，但如果未来批次规模继续增长，需要考虑减少跨 activity 传递的数据量（如只传 doc_id 列表，body_md 直接在 activity 内部读写）。
 - `>8 条建议拆分子类`目前只记录日志不自动执行，`research-papers` 桶真实批次里达到 74 条，明显需要人工评估是否要拆子类——留给后续批次观察积累后再决定。
+
+## 追加深化：Daily 主题小标题 emoji + Topic 反链对齐（2026-07-05）
+
+M8 迁移旧 vault 后，对比发现旧系统 Daily 页面每个主题小标题带 emoji 增色、且可点击跳转对应 Topic 页，新系统 `_build_daily_record` 生成的小标题只是纯英文 bucket 名，样式明显退化。核实旧系统的 emoji 是"每天调用 LLM 现造"，同一个 bucket 在不同日期字面/emoji 都可能不一致——不复刻这种不确定性，改为固定映射表。
+
+`backend/worker/aggregate.py` 新增 `TOPIC_EMOJI`/`TOPIC_LABEL` 两张固定映射表（覆盖 `TOPIC_BUCKETS` 全部 10 个桶 + `uncategorized`），`_topic_heading(slug)` 拼成 `"## {emoji} {中文名} [[{slug}]]"`；`_build_daily_record` 的 `topic_sections` 改用该函数生成标题，`link_targets` 同步补上 `sorted(groups)`（本篇涉及的全部 topic slug），使 Topic 页面能反查到引用自己的 Daily。新增回归测试 `test_daily_record_topic_heading_has_emoji_and_wikilink`（`backend/tests/test_aggregate.py`），断言标题含 emoji 与 `[[slug]]`、且 slug 进入 `link_targets`。
+
+**已生成历史文档的补数**（一次性数据修补，不是代码逻辑，未来批次已自动生效）：`2026-07-05` 这篇 Daily 是迁移前生成的，手动用一次性脚本按新格式重写其 8 个主题小标题并补插 `links` 行；同时该篇缺失"昨日回顾"链接（生成时 `2026-07-04` 的 Daily 尚不存在，M8 迁移把它补进来后才具备条件）——补插 `## 昨日回顾` 区块 + `frontmatter.previous_daily` 字段 + 对应 `links` 行。之后新生成的 Daily 不再需要这类手工介入。
