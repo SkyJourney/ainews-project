@@ -61,3 +61,31 @@ def test_needs_translation_false_for_already_chinese_title():
 
 def test_needs_translation_true_for_english_content():
     assert enrich.needs_translation("English Title", "This is an English article body with no Chinese at all.") is True
+
+
+# ---------------------------------------------------------------------------
+# compute_word_count：机械字数统计（04 §2.4 硬约束：不能靠 LLM 自估），此前口径
+# 未剥离链接/图片引用导致注水（I2，见 .claude/memory/known_issues.md），补边界测试。
+# ---------------------------------------------------------------------------
+
+def test_compute_word_count_counts_non_whitespace_chars():
+    assert enrich.compute_word_count("这是五个字") == 5
+
+
+def test_compute_word_count_excludes_code_blocks():
+    text = "正文两个字\n```python\nsome code that should not count towards word count\n```"
+    assert enrich.compute_word_count(text) == 5
+
+
+def test_compute_word_count_excludes_markdown_link_urls():
+    # 链接锚文本（"详情"）算正文，但 URL 本身不该被计入字数——不剥离的话仅这一个
+    # URL 就能贡献 100+ 字，正确剥离后应该远小于这个量级（此前未剥离，会注水，I2）
+    long_url = "https://example.com/" + "x" * 100
+    text = f"正文两个字 [详情]({long_url}) 结尾两个字"
+    assert enrich.compute_word_count(text) < 20
+
+
+def test_compute_word_count_excludes_local_image_refs():
+    long_hash = "abcdef0123456789" * 3
+    text = f"正文两个字![配图]({enrich.IMAGE_URL_PREFIX}2026-07-05/{long_hash}.jpg)结尾两个字"
+    assert enrich.compute_word_count(text) < 20

@@ -138,19 +138,17 @@ def _dedup_cross_source_papers(entries: list[Entry]) -> tuple[list[Entry], int]:
             kept.append(entry)
             continue
 
-        # 命中同一篇论文：保留规范链接源（arxiv.org）版本，其余并入 also_reported_by。
-        # 同一个源自己内部撞车（如 arxiv-api 按 cs.AI/cs.LG 分类分别查询，同一篇论文
-        # 跨类目被查两次）不算"跨源"，直接丢弃、不计入 also_reported_by。
+        # 命中同一篇论文：保留规范链接源（arxiv.org）版本。同一个源自己内部撞车
+        # （如 arxiv-api 按 cs.AI/cs.LG 分类分别查询，同一篇论文跨类目被查两次）
+        # 不算"跨源"，直接丢弃。
         canonical_idx = seen_titles[title_key]
         canonical = kept[canonical_idx]
-        if entry.source_name != canonical.source_name:
-            also_reported = canonical.extra.setdefault("also_reported_by", [])
-            if "arxiv.org" in entry.url and "arxiv.org" not in canonical.url:
-                also_reported.append(canonical.source_name)
-                entry.extra["also_reported_by"] = also_reported
-                kept[canonical_idx] = entry
-            else:
-                also_reported.append(entry.source_name)
+        if (
+            entry.source_name != canonical.source_name
+            and "arxiv.org" in entry.url
+            and "arxiv.org" not in canonical.url
+        ):
+            kept[canonical_idx] = entry
         dropped += 1
 
     return kept, dropped

@@ -43,3 +43,6 @@ playwright==1.61.0
 # M5 起 aggregate/write 引入跨批次累积状态，光靠真实批次测试成本变高）──
 pytest==9.1.1
 pytest-mock==3.15.1
+# workflows.py 的编排逻辑测试要真正驱动一次 Temporal workflow 执行（time-skipping
+# WorkflowEnvironment），需要 async 测试支持。
+pytest-asyncio==1.4.0

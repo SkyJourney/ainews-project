@@ -33,6 +33,7 @@ from worker.db import (
     document_id_exists,
     fetch_enriched_articles,
 )
+from worker.enrich import content_hash
 from worker.filter import normalize_url_for_index
 from worker.llm_client import call_structured
 from worker.schemas import ClusterAssignment, DailyHighlights, TagAssignment
@@ -112,18 +113,33 @@ _BATCH_CALL_MAX_TOKENS = 8000
 _DIGEST_BLURB_MAX_CHARS = 120
 
 
-def _slugify(title: str, max_words: int = MAX_SLUG_WORDS) -> str:
-    """默认 slug 方案：取标题里的字母数字词（连字符/标点天然分词点），转小写 kebab-case。"""
+def _slugify(title: str, fallback_seed: str, max_words: int = MAX_SLUG_WORDS) -> str:
+    """默认 slug 方案：取标题里的字母数字词（连字符/标点天然分词点），转小写 kebab-case。
+
+    纯中文标题（大量中文源的 fetched_title 本身就是纯中文）匹配不到任何 ASCII 词——
+    不能退化成固定字符串 "untitled"，否则任意两篇不相关的纯中文标题文章会在 slug 层面
+    碰撞，被 zettel 复用判断误判为"同一篇"而错误合并（见 .claude/memory/known_issues.md）。
+    退化时改用调用方传入的 fallback_seed（如 original_id）算出的短哈希，保证不同文章
+    不会撞到同一个 slug。
+    """
     words = re.findall(r"[a-zA-Z0-9]+", title)[:max_words]
-    return "-".join(w.lower() for w in words) if words else "untitled"
+    if words:
+        return "-".join(w.lower() for w in words)
+    return f"untitled-{hashlib.sha256(fallback_seed.encode('utf-8')).hexdigest()[:8]}"
 
 
 def _humanize_slug(slug: str) -> str:
     return " ".join(w.capitalize() for w in slug.split("-"))
 
 
-def _content_hash(body_md: str) -> str:
-    return hashlib.sha256(body_md.encode("utf-8")).hexdigest()
+def _display_title(article: dict) -> str:
+    """展示用标题：优先译文标题，没有翻译（已是中文）则用原文标题。"""
+    return article["translated_title"] or article["fetched_title"]
+
+
+# content_hash 口径与 enrich.py 保持唯一实现来源，避免两处 sha256 各写一份、
+# 未来调整口径时漏改一处（见 .claude/memory/known_issues.md）。
+_content_hash = content_hash
 
 
 def _generate_doc_id(slug: str, used_in_batch: set[str]) -> str:
@@ -187,7 +203,7 @@ def _run_cluster_assignment_chunk(articles: list[dict], existing_topics: list[st
     不采信模型自己的判断（04 §2.5 `is_new` 强制规则）。
     """
     lines = [
-        f"- url: {a['url']}\n  title: {a['translated_title'] or a['fetched_title']}\n  gist: {a['gist']}"
+        f"- url: {a['url']}\n  title: {_display_title(a)}\n  gist: {a['gist']}"
         for a in articles
     ]
     user_content = (
@@ -296,7 +312,7 @@ def _decide_zettel(index_entry: dict | None, slug: str, used_ids: set[str]) -> d
 # ---------------------------------------------------------------------------
 
 def _build_original_record(article: dict, original_id: str, zettel_id: str | None, decision: dict, tags: list[str]) -> dict:
-    title = article["translated_title"] or article["fetched_title"]
+    title = _display_title(article)
     # 不在 body_md 里重复拼 "# {title}"：title 已经是独立字段（documents.title 列 +
     # frontmatter.title），前端详情页会单独渲染一次；重复拼会导致页面标题渲染两遍，
     # 对 original 类型还会跟原文本身自带的标题结构叠成三层 H1（真实批次验证时发现）。
@@ -328,7 +344,7 @@ def _build_original_record(article: dict, original_id: str, zettel_id: str | Non
 
 
 def _build_zettel_record(article: dict, zettel_id: str, original_id: str, decision: dict, tags: list[str]) -> dict:
-    title = article["translated_title"] or article["fetched_title"]
+    title = _display_title(article)
     # 同 _build_original_record：title 已是独立字段，不在 body_md 里重复拼标题
     body_md = f"{article['gist']}\n\n原文归档：[[{original_id}]]"
     frontmatter = {
@@ -361,7 +377,7 @@ def _topic_date_heading(d: date) -> str:
 
 
 def _render_topic_entry_line(article: dict, zettel_id: str | None, original_id: str) -> str:
-    title = article["translated_title"] or article["fetched_title"]
+    title = _display_title(article)
     link_id = zettel_id or original_id
     return f"- [[{link_id}]] {title}：{article['gist']}"
 
@@ -437,7 +453,7 @@ def _select_daily_highlights(articles: list[dict]) -> list[str]:
         return [a["url"] for a in articles]
 
     lines = [
-        f"- url: {a['url']}\n  title: {a['translated_title'] or a['fetched_title']}\n  gist: {a['gist']}"
+        f"- url: {a['url']}\n  title: {_display_title(a)}\n  gist: {a['gist']}"
         for a in articles
     ]
     result = call_structured(
@@ -472,7 +488,7 @@ _DAILY_ENTRY_MARKERS = {
 
 
 def _render_daily_entry_line(article: dict, ctx: dict) -> str:
-    title = article["translated_title"] or article["fetched_title"]
+    title = _display_title(article)
     link_id = ctx["zettel_id"] or ctx["original_id"]
     category = _classify_daily_entry(article, ctx)
     marker = _DAILY_ENTRY_MARKERS[category]
@@ -596,7 +612,7 @@ def _build_digest_entries(articles: list[dict]) -> list[dict]:
         seen_urls.add(url)
         entries.append(
             {
-                "title": article["translated_title"] or article["fetched_title"],
+                "title": _display_title(article),
                 "source_name": article["source_name"],
                 "url": url,
                 "blurb": _truncate_blurb(article["gist"]),
@@ -640,7 +656,7 @@ def _run_tag_assignment(articles: list[dict]) -> dict[str, list[str]]:
 
 def _run_tag_assignment_chunk(articles: list[dict]) -> dict[str, list[str]]:
     lines = [
-        f"- url: {a['url']}\n  title: {a['translated_title'] or a['fetched_title']}\n  "
+        f"- url: {a['url']}\n  title: {_display_title(a)}\n  "
         f"gist: {a['gist']}\n  entities: {a.get('entities') or []}"
         for a in articles
     ]
@@ -693,7 +709,7 @@ def aggregate_activity(batch_id: str) -> list[dict]:
         zettel_id: str | None = None
         is_new_zettel = False
         if decision["zettel_worthy"]:
-            slug = _slugify(article["fetched_title"])
+            slug = _slugify(article["fetched_title"], original_id)
             zettel_decision = _decide_zettel(index_entry, slug, used_zettel_ids)
             zettel_id = zettel_decision["zettel_id"]
             is_new_zettel = zettel_decision["action"] == "create"

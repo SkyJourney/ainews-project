@@ -260,6 +260,23 @@ def test_zettel_record_body_does_not_repeat_title():
     assert "示例标题" not in record["body_md"]
 
 
+def test_original_and_zettel_records_have_distinct_doc_type():
+    """M1-M4 曾经用 zettel 顶替过 Original 的角色（见 .claude/memory/decisions.md），
+    这条断言直接防止两者的 doc_type 被写反/合并——不只测"两个函数存在"，还测"值不一样"。
+    """
+    article = make_enriched_article(translated_title="示例标题", gist="这是摘要")
+    decision = {"topic_slug": "agents", "is_new_topic": False, "zettel_worthy": True, "rationale": "r"}
+
+    original = aggregate._build_original_record(article, "original-abc", "202607050931-example", decision, [])
+    zettel = aggregate._build_zettel_record(article, "202607050931-example", "original-abc", decision, [])
+
+    assert original["doc_type"] == "original"
+    assert original["frontmatter"]["doc_type"] == "original"
+    assert zettel["doc_type"] == "zettel"
+    assert zettel["frontmatter"]["doc_type"] == "zettel"
+    assert original["doc_type"] != zettel["doc_type"]
+
+
 def test_topic_record_first_creation_body_does_not_repeat_title(mocker):
     mocker.patch.object(aggregate, "aggregate_get_document", return_value=None)
     article = make_enriched_article()

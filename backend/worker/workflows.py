@@ -16,6 +16,9 @@ with workflow.unsafe.imports_passed_through():
         translate_activity,
         upsert_article_activity,
     )
+    # needs_translation/compute_word_count/content_hash 是直接调用（不是 activity），
+    # 三者都在 enrich.py 里标了 "[Temporal 回放安全]"——必须保持确定性纯函数，改动前
+    # 先看那边的说明。
     from worker.enrich import compute_word_count
     from worker.enrich import content_hash as compute_content_hash
     from worker.fetch import (
@@ -196,7 +199,13 @@ class AInewsPipelineWorkflow:
 
     @staticmethod
     async def _fetch_one_source(source_name: str, retry_policy: RetryPolicy) -> list:
-        """单个源的 preflight+fetch+健康状态记录，供 fan-out 并发调用。"""
+        """单个源的 preflight+fetch+健康状态记录，供 fan-out 并发调用。
+
+        preflight_activity 返回的 PreflightResult（reliability/stale）目前只在 activity
+        内部打日志用于人工告警，这里没有据此做任何跳过/降级决策——是预留的扩展点，不是
+        遗漏（见 .claude/memory/known_issues.md）。如果以后要真正"stale 就跳过这个源"，
+        需要在这里读返回值再决定是否继续 fetch_activity。
+        """
         await workflow.execute_activity(
             preflight_activity,
             source_name,
