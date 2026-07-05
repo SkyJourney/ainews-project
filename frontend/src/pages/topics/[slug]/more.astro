@@ -18,7 +18,7 @@ if (!row || row.doc_type !== 'topic') {
   return new Response(null, { status: 404, statusText: 'Not Found' })
 }
 
-const sections = splitTopicSections(row.body_md)
+const sections = splitTopicSections(row.body_md, row.content_hash)
 const start = (page - 1) * TOPIC_DETAIL_SECTIONS_PER_BATCH
 const batch = sections.slice(start, start + TOPIC_DETAIL_SECTIONS_PER_BATCH)
 const hasMore = start + batch.length < sections.length

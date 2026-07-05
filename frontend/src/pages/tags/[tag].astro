@@ -33,6 +33,12 @@ if (docs.length === 0) {
       />
     ))}
   </div>
+
+  {total > docs.length && (
+    <p class="tag-list-truncated-notice">
+      仅显示最新 {docs.length} 条（共 {total} 条），标签页暂不支持翻页
+    </p>
+  )}
 </BaseLayout>
 
 <style>
@@ -41,5 +47,12 @@ if (docs.length === 0) {
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 1rem;
     margin-top: 2rem;
+  }
+
+  .tag-list-truncated-notice {
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--color-darkgray);
   }
 </style>

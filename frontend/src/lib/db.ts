@@ -18,6 +18,11 @@ function getPool(): pg.Pool {
       throw new Error('DATABASE_URL 环境变量未设置（frontend 只读连接 Postgres ainews_content 库）')
     }
     pool = new pg.Pool({ connectionString })
+    // 空闲连接被数据库端断开（网络抖动/维护重启）时 pg.Pool 会 emit 'error'；不监听的话
+    // Node 会把它当成未捕获异常，直接终止这个常驻 SSR 进程，而不只是让当次请求失败。
+    pool.on('error', (err) => {
+      console.error('Postgres 连接池空闲连接异常：', err)
+    })
   }
   return pool
 }
@@ -124,6 +129,16 @@ export async function fetchMaxDocDate(docType: string): Promise<string | null> {
     [docType],
   )
   return rows[0]?.max ?? null
+}
+
+/** 首页专用：只取最新一条的 id，交给 getLiveEntry 单条渲染，避免首页把整个 doc_type
+ * 的全部文档都跑一遍 toLiveEntry（markdown 渲染 + backlinks/tags 查询）却只用第一条。 */
+export async function fetchLatestDocumentId(docType: string): Promise<string | null> {
+  const { rows } = await getPool().query<{ id: string }>(
+    'SELECT id FROM documents WHERE doc_type = $1 ORDER BY doc_date DESC NULLS LAST, updated_at DESC LIMIT 1',
+    [docType],
+  )
+  return rows[0]?.id ?? null
 }
 
 /** Daily 专用：frontmatter.topics 是数组字段，去重需要先展开再计数。 */

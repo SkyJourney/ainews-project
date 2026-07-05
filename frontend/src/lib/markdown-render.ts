@@ -5,13 +5,50 @@
 // 复用 astro.config.mjs 里同一个 remarkWikiLink 插件，保证渲染结果一致。
 
 import { createMarkdownProcessor } from '@astrojs/markdown-remark'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import { remarkWikiLink } from './wiki-link'
+
+// body_md 来源含外部信源原文抓取 + LLM 翻译/摘要产出，Astro 的 markdown 处理器默认
+// allowDangerousHtml + rehypeRaw（原始 HTML 标签会原样保留），不加清洗层就是存储型
+// XSS 风险面。用 GitHub 风格默认白名单兜底，只额外放行两类我们自己代码生成、已知
+// 安全的属性：
+//   - wikilink 悬浮预览（wiki-link.ts）：<a> 上的 data-wiki-target/data-preview-title/
+//     data-preview-excerpt，走 mdast hProperties 桥接，属性名保持字面 kebab-case
+//     （不会被规范化成 camelCase，需要按实际出现的 key 放行）。
+//   - Shiki 代码高亮（Astro 内置）：<pre>/<span> 上的 class/style/tabindex/data-language，
+//     Shiki 自己构造 hast 节点时用的是原始 HTML 属性名（class/tabindex），不是 hast
+//     规范化后的 className/tabIndex，同样需要按字面 key 放行（实测确认过，见
+//     .claude/memory/known_issues.md）。
+// 默认白名单本身已经拦截 script/iframe/on* 事件属性/javascript: 协议等危险内容，
+// 这里不放宽这部分。
+function buildSanitizeSchema() {
+  const schema = structuredClone(defaultSchema)
+  const existingA = (schema.attributes?.a ?? []).filter(
+    (entry) => (typeof entry === 'string' ? entry : entry[0]) !== 'className',
+  )
+  schema.attributes = {
+    ...schema.attributes,
+    a: [
+      ...existingA,
+      ['className', 'data-footnote-backref', 'wikilink', 'broken'],
+      'data-wiki-target',
+      'data-preview-title',
+      'data-preview-excerpt',
+    ],
+    pre: [...(schema.attributes?.pre ?? []), 'class', 'style', 'tabindex', 'dataLanguage'],
+    span: [...(schema.attributes?.span ?? []), 'class', 'style'],
+  }
+  return schema
+}
 
 let processorPromise: ReturnType<typeof createMarkdownProcessor> | undefined
 
 function getProcessor() {
   if (!processorPromise) {
-    processorPromise = createMarkdownProcessor({ remarkPlugins: [remarkWikiLink] })
+    processorPromise = createMarkdownProcessor({
+      remarkPlugins: [remarkWikiLink],
+      rehypePlugins: [[rehypeSanitize, buildSanitizeSchema()]],
+    })
   }
   return processorPromise
 }

@@ -8,7 +8,14 @@ import AIBadge from '../cards/AIBadge.astro'
 import LuminaBacklinks from '../enhance/LuminaBacklinks.astro'
 
 interface Props {
-  entry: any // Live Collection entry，M6 起数据源是 Postgres，不再有 build-time CollectionEntry 类型
+  // Live Collection entry，M6 起数据源是 Postgres，不再有 build-time CollectionEntry 类型。
+  // 刻意保留 any：给 entry.data 用非 any 类型（哪怕只是 Record<string, unknown>）会让下面
+  // `(entry.data.stats as Record<string, number>) ?? {}` 这类"断言后接 ??"的写法触发
+  // astro check 的一个已知级联解析 bug（ts(2869) "??右侧不可达" 之后，同一个 JSX 表达式
+  // 块里的后续代码会被误判成语法错误——已实测复现，见 DailyMonthGroup.astro 同款写法
+  // 收紧类型后从 3 个错误级联成 15+ 个，且回退后才恢复；.claude/memory/known_issues.md
+  // 有记录）。这不是"偷懒用 any"，是当前 Astro 7 + astro check 工具链的限制。
+  entry: any
 }
 
 const { entry } = Astro.props

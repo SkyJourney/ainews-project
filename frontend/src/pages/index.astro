@@ -3,15 +3,18 @@
 // 走同一个 DailyPageContent 组件，canonical 指向 /daily/{latest}/
 export const prerender = false
 
-import { getLiveCollection } from 'astro:content'
+import { getLiveEntry } from 'astro:content'
 import BaseLayout from '../layouts/BaseLayout.astro'
 import DailyPageContent from '../components/content/DailyPageContent.astro'
+import { fetchLatestDocumentId } from '../lib/db'
 
-const { entries, error } = await getLiveCollection('daily')
-if (error) throw error
-const all = [...(entries ?? [])].sort((a, b) => b.id.localeCompare(a.id))
-const latest = all[0]
-if (!latest) throw new Error('No daily entries — documents 表暂无 daily 记录')
+// 只查最新一条的 id 再单条渲染，不走 getLiveCollection 把全部 daily 文档都跑一遍
+// markdown 渲染 + backlinks/tags 查询（daily 文档数量随时间单调增长，这里只用得上
+// 排序后的第一条，之前的全表加载是真实的 N+1 性能问题）。
+const latestId = await fetchLatestDocumentId('daily')
+if (!latestId) throw new Error('No daily entries — documents 表暂无 daily 记录')
+const { entry: latest, error } = await getLiveEntry('daily', latestId)
+if (error || !latest) throw error ?? new Error(`未找到 daily 文档：${latestId}`)
 const canonical = new URL(`/daily/${latest.id}/`, Astro.site ?? 'http://localhost:4321').toString()
 ---
 

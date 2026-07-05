@@ -12,7 +12,37 @@ export interface TopicSection {
 
 const SECTION_HEADING_RE = /^## (\d{4}-\d{2}-\d{2})\s*$/
 
-export function splitTopicSections(bodyMd: string): TopicSection[] {
+// Topic 正文长期单调增长（如 research-papers 已有 200+ 条目），详情页首屏 + 每次
+// "更多"翻页都会调用一次 splitTopicSections——不缓存的话每次翻页都要重新对全量
+// body_md 做一遍正则切分。用 content_hash 做缓存键（内容变了 hash 天然失效），
+// 与 markdown-render.ts 的 renderCache 是同一个模式。
+const sectionsCache = new Map<string, TopicSection[]>()
+const SECTIONS_CACHE_MAX_ENTRIES = 100
+
+export function splitTopicSections(bodyMd: string, cacheKey?: string): TopicSection[] {
+  if (cacheKey) {
+    const cached = sectionsCache.get(cacheKey)
+    if (cached) {
+      sectionsCache.delete(cacheKey)
+      sectionsCache.set(cacheKey, cached) // 命中后移到最新位置，实现近似 LRU
+      return cached
+    }
+  }
+
+  const sections = _splitTopicSections(bodyMd)
+
+  if (cacheKey) {
+    if (sectionsCache.size >= SECTIONS_CACHE_MAX_ENTRIES) {
+      const oldestKey = sectionsCache.keys().next().value
+      if (oldestKey !== undefined) sectionsCache.delete(oldestKey)
+    }
+    sectionsCache.set(cacheKey, sections)
+  }
+
+  return sections
+}
+
+function _splitTopicSections(bodyMd: string): TopicSection[] {
   const lines = bodyMd.split('\n')
   const sections: TopicSection[] = []
   let currentKey: string | null = null
