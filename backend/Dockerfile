@@ -10,6 +10,6 @@ RUN playwright install --with-deps chromium
 
 COPY . .
 
-# 默认跑 Temporal worker；celery-worker/celery-beat 服务在 docker-compose 里
-# 用 command: 覆盖成 celery 命令，共用同一个镜像，不必分开维护两个 Dockerfile。
+# M7 起定时触发改用 Temporal 原生 Schedule（worker 启动时自 ensure），不再需要
+# celery-worker/celery-beat 服务，镜像只跑这一个入口。
 CMD ["python", "-m", "worker.worker"]

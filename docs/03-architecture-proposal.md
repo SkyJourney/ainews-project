@@ -7,14 +7,16 @@
 > **2026-07-04 修订（二）·流水线颗粒度重设计**：现有 Claude Code subagent 架构里"cluster 要批量判断全部条目""originalize 才按条 fan-out"这种粗颗粒度，根源是每次 spawn subagent 都要背一整套 Claude Code 系统上下文，固定成本高到必须靠批量摊薄。服务化之后直连 LiteLLM，每次调用只背精简 system prompt，边际成本主要是内容本身，颗粒度可以下沉到"每篇文章一条独立子线程"。本次修订把原 Phase 3 Cluster 的判断部分与 Phase 3.5 Originalize **合并成一个 per-article 的 `enrich_activity` fan-out**，topic 聚合等跨文章判断挪到独立的 `aggregate_activity` 里，并废弃 `00-Inbox/*.json` 手工 IPC 文件（`articles` 表本身就是durable 中间态）。同时确认了一条设计边界：**per-article 线程只能判断"这篇文章本身是什么"，不能判断"该归哪个 topic/是否与同批次其他文章重复"这类跨文章关系**——后者必须留给聚合阶段。向量化/embedding 作为已确认的未来扩展方向，见 [§8](#8-未来扩展向量化--自建-rag)。
 >
 > **2026-07-04 修订（三）·git 退出关键路径 + 后端边界重新划定**：原设计把 `write_activity`（写 Markdown 到 git 目录）+ `git_sync_activity`（commit+push）留在每次 pipeline 跑的关键路径上，这是照搬旧 AInews vault 项目"git 是运行时依赖"的惯性——但 Astro 切到 SSR 直接查 Postgres 之后，**git 完全不在任何请求路径或运行时依赖链上**，把它留在关键路径里只是历史包袱，没有运行时收益。本次修订：(1) **Postgres 变成唯一权威存储**，`write_activity` 直接把内容写进 `documents` 表，不再经过"写文件→git commit→reindex 扫描文件"这三步，`reindex_activity` 从"每次跑都要执行的关键步骤"降级为"schema 变更或灾难恢复时才用的独立维护工具"；(2) git 导出（如果要保留，用于 Obsidian 浏览/审阅历史）变成一个**完全脱离主 pipeline 的可选任务**，导出失败不影响线上服务；(3) 明确"后端"的边界——真正提供"内容能力"（抓取+查询）的是 **Temporal（编排）+ Celery（触发器）+ 查询接口（Astro SSR 的 Node 进程负责，或未来拆成独立 API）** 这三者的合集，Astro 只是承载它们输出的 UI 骨架 + 交互入口，不是独立于"后端"之外的另一套系统。这也是"内容更新即数据库写入、无需重建/重新部署/重启容器"这个长期运行优势的关键澄清点。详见 [01 §关键横切问题](./01-document-database-research.md#关键横切问题git-权威-vs-db-权威) 的对应修订。
+>
+> **2026-07-05 修订（四）·定时触发改用 Temporal 原生 Schedule，退役 Celery Beat**：M7 生产化收尾阶段核实，Redis 在全代码库里唯一的用途就是 Celery broker，没有任何其他模块依赖它；已安装的 `temporalio` SDK 原生支持 Schedule Client API（`create_schedule`/`ScheduleSpec` 等价于 cron），Temporal Web UI 本身就能查看/暂停/手动触发/回填 schedule，可观测性比 Celery Beat 只能看日志更好。改为 worker 启动时幂等 `ensure_pipeline_schedule`，`celery-worker`/`celery-beat`/`redis` 三个容器整体退役，`backend/beat/` 模块删除。唯一需要处理的细节：`batch_id`（写入 `articles` 表参与跨日去重）此前由 Celery task 在 workflow 外部用 `datetime.now()` 生成（当时的确定性约束要求"必须在 workflow 外部生成"）；改用 Schedule 后，`workflow.info().start_time` 提供了同样真实、且在 workflow 历史里一次写死不会被 replay 重新计算的时间戳，可以直接在 workflow 内部生成 `batch_id`，不再需要外部触发层这道工序。详见 `.claude/memory/decisions.md`。
 
 ## 1. 组件总览
 
-> **后端 / 前端边界说明**：这套系统里"后端"不是"除了 UI 之外的一切"这种笼统说法，而是特指提供**内容能力**（抓取、富化、聚合、查询）的三者合集——**Temporal（编排）+ Celery（定时触发）+ 查询接口（由 Astro SSR 的 Node 进程直接查 Postgres 提供，未来也可以拆成独立 API）**。Astro 只是承载这套后端能力输出的 **UI 骨架 + 交互入口**，本身不持有内容能力。这个边界决定了系统的核心优势：内容更新 = 后端对 Postgres 的一次写入，前端下一次请求就能看到，**不需要重新构建、不需要重新部署、不需要重启任何容器**——这是长期运行服务区别于"静态站点每次重新发布"模式的根本所在。
+> **后端 / 前端边界说明**：这套系统里"后端"不是"除了 UI 之外的一切"这种笼统说法，而是特指提供**内容能力**（抓取、富化、聚合、查询）的三者合集——**Temporal（编排 + 定时触发）+ 查询接口（由 Astro SSR 的 Node 进程直接查 Postgres 提供，未来也可以拆成独立 API）**。Astro 只是承载这套后端能力输出的 **UI 骨架 + 交互入口**，本身不持有内容能力。这个边界决定了系统的核心优势：内容更新 = 后端对 Postgres 的一次写入，前端下一次请求就能看到，**不需要重新构建、不需要重新部署、不需要重启任何容器**——这是长期运行服务区别于"静态站点每次重新发布"模式的根本所在。
 
 | 组件 | 技术选型 | 职责 |
 |---|---|---|
-| 定时触发 | Celery Beat + Redis（broker） | 纯 cron 触发器，到点只做一件事：调用 `client.start_workflow(...)` |
+| 定时触发 | Temporal Schedule（原生） | 到点只做一件事：`create_schedule` 的 action 直接是 `AInewsPipelineWorkflow.run`；worker 启动时幂等 `ensure_pipeline_schedule`；M7 起取代 Celery Beat + Redis（见修订四） |
 | 编排引擎 | Temporal Server + Postgres（Temporal 自身状态存储） | 持久化工作流状态、动态 fan-out/fan-in、按 activity 粒度重试、崩溃重放、Web UI 可观测性 |
 | 编排执行体 | Temporal Worker（Python 进程） | 承载 `AInewsPipelineWorkflow` 定义与全部 activity 实现 |
 | 模型执行层 | 自建 **LiteLLM**（OpenAI 兼容网关，已统一转发 OpenAI/Anthropic 等多端点）+ 可选 **Instructor**（结构化输出校验） | 在需要"判断/归纳/翻译"的 activity 内部发起模型调用；具体调哪个模型是 activity 里的一个配置值，不引入任何厂商专属 Agent 框架 |
@@ -28,9 +30,7 @@
 ```mermaid
 flowchart TB
     subgraph SCHED["定时触发层"]
-        CB["Celery Beat<br/>cron: 每日 09:00"]
-        CW["Celery Worker<br/>(极薄：只转发 start_workflow)"]
-        REDIS[("Redis")]
+        SCHEDULE["Temporal Schedule<br/>cron: 每日 09:00 Asia/Shanghai<br/>(worker 启动时幂等 ensure)"]
     end
 
     subgraph ORCH["编排层 · Temporal"]
@@ -80,8 +80,7 @@ flowchart TB
     ASTRO["Astro 6 SSR<br/>Live Content Collections"]
     USER["用户浏览器"]
 
-    CB --> CW --> TS
-    CW -.broker.- REDIS
+    SCHEDULE --> TS
     TS <--> PGSTATE
     TS --> WF
     WF --> F1 --> FILTER --> E1 --> CLUSTER --> WRITE --> DIGEST
@@ -198,8 +197,8 @@ CREATE INDEX tags_tag_idx ON tags (tag);
 
 ```yaml
 services:
-  redis:              # Celery broker
-  celery-beat:        # 定时触发，极薄
+  # 定时触发：Temporal 原生 Schedule（temporal-worker 启动时幂等 ensure），
+  # 不再需要独立的 redis/celery-beat 服务（见修订四）
   postgres:           # 单实例多 database：temporal / ainews_content（各自独立 schema，不混表）
   temporal:           # Temporal Server，指向 postgres 的 temporal database
   temporal-worker:    # Python worker，跑 workflow + activity + 直连 LiteLLM
@@ -223,7 +222,7 @@ services:
 2. **前端先行**：Astro 切 SSR + Live Content Collections 查这个 Postgres，与现有静态站点并行部署，验证"去静态编译"这条路径独立可行。
 3. **挑最痛的 Phase 先接 Temporal**：优先把原 Phase 3.5 Originalize 改造成 Temporal 的 `enrich_activity` fan-out（先只做"抓原文+翻译判断"，暂不急着把 cluster 判断也合并进来）——这是当前唯一有真实故障案例的阶段，改造收益最直接可验证。此时 Temporal Server 需要自己的 Postgres database，直接接到第 1 步已经起好的 Postgres 实例上即可，不必新起一台。
 4. **逐步迁移其余 Phase**：把 8 个 `.claude/agents/news-*.md` 的 system prompt 逐个改写成经 LiteLLM 的结构化调用（配合 Instructor 校验输出 schema），把 cluster 判断部分从 Aggregate 拆出来并入 `enrich_activity`（完成"颗粒度下沉"这一步），Fetch/Aggregate/Write/Digest 依次接入。
-5. **切换触发源**：Celery Beat 接管 Desktop Scheduled Task 的定时职责，新旧两条路并行观察一段时间，确认新链路稳定后再下线旧的 `/ai-news` Desktop Scheduled Task。
+5. **切换触发源**：Temporal Schedule（原计划是 Celery Beat，M7 落地时改为 Temporal 原生方案，见修订四）接管 Desktop Scheduled Task 的定时职责，新旧两条路并行观察一段时间，确认新链路稳定后再下线旧的 `/ai-news` Desktop Scheduled Task。
 6. **（可选）接入 Langfuse**：在核心链路稳定运行之后再评估，避免第一阶段就叠加一套四组件的可观测性栈，见待决问题 6。
 
 ## 7. 待决问题

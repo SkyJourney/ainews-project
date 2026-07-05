@@ -10,7 +10,13 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from temporalio.client import Client
+from temporalio.client import (
+    Client,
+    Schedule,
+    ScheduleActionStartWorkflow,
+    ScheduleAlreadyRunningError,
+    ScheduleSpec,
+)
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
@@ -29,16 +35,43 @@ from worker.fetch import (
     record_source_health_activity,
 )
 from worker.filter import filter_activity
+from worker.schemas import PipelineParams
 from worker.workflows import AInewsPipelineWorkflow, EnrichArticleWorkflow
 from worker.write import write_activity
 
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "ainews-task-queue"
 MAX_ACTIVITY_WORKERS = 20
+PIPELINE_SCHEDULE_ID = "ainews-pipeline-daily"
+
+
+async def ensure_pipeline_schedule(client: Client) -> None:
+    """幂等确保每日调度存在：不存在则创建，已存在则跳过（M7 起用 Temporal 原生 Schedule
+    取代 Celery Beat，04 §2.8）。cron 沿用原 Celery Beat 的 09:00 Asia/Shanghai；workflow id
+    只是模板，Temporal Server 会在每次实际触发时自动加时间戳后缀，不会跨次冲突。"""
+    try:
+        await client.create_schedule(
+            PIPELINE_SCHEDULE_ID,
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    AInewsPipelineWorkflow.run,
+                    PipelineParams(),
+                    id=f"{PIPELINE_SCHEDULE_ID}-run",
+                    task_queue=TASK_QUEUE,
+                ),
+                spec=ScheduleSpec(
+                    cron_expressions=["0 9 * * *"],
+                    time_zone_name="Asia/Shanghai",
+                ),
+            ),
+        )
+    except ScheduleAlreadyRunningError:
+        pass
 
 
 async def main() -> None:
     client = await Client.connect(TEMPORAL_HOST, data_converter=pydantic_data_converter)
+    await ensure_pipeline_schedule(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

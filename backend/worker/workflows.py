@@ -110,13 +110,16 @@ class EnrichArticleWorkflow:
 @workflow.defn
 class AInewsPipelineWorkflow:
     """全信息源端到端管道：preflight+fetch×N（活跃源 fan-out）→ filter（合并后批量）→
-    enrich×M（child workflow fan-out）→ aggregate → write。batch_id 由 Celery Beat
-    触发时生成并传入（04 §2.8）；活跃源列表从 sources.yaml 读取（03 doc 既定架构）。
+    enrich×M（child workflow fan-out）→ aggregate → write。batch_id 由 Temporal Schedule
+    触发时留空，workflow 内部用 workflow.info().start_time 兜底生成（M7 起取代 Celery Beat，
+    该时间戳在 workflow 历史里一次写死、replay 不会重新计算，满足确定性约束）；
+    活跃源列表从 sources.yaml 读取（03 doc 既定架构）。
     """
 
     @workflow.run
     async def run(self, params: PipelineParams) -> dict:
         default_retry = RetryPolicy(maximum_attempts=3)
+        batch_id = params.batch_id or workflow.info().start_time.strftime("%Y-%m-%d-%H%M")
 
         active_sources = await workflow.execute_activity(
             list_active_sources_activity,
@@ -141,7 +144,7 @@ class AInewsPipelineWorkflow:
 
         kept = await workflow.execute_activity(
             filter_activity,
-            args=[entries, params.batch_id],
+            args=[entries, batch_id],
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=default_retry,
         )
@@ -152,8 +155,8 @@ class AInewsPipelineWorkflow:
             *(
                 workflow.execute_child_workflow(
                     EnrichArticleWorkflow.run,
-                    EnrichArticleParams(entry=entry, batch_id=params.batch_id),
-                    id=f"{params.batch_id}-enrich-{i}",
+                    EnrichArticleParams(entry=entry, batch_id=batch_id),
+                    id=f"{batch_id}-enrich-{i}",
                 )
                 for i, entry in enumerate(kept)
             ),
@@ -165,7 +168,7 @@ class AInewsPipelineWorkflow:
 
         records = await workflow.execute_activity(
             aggregate_activity,
-            params.batch_id,
+            batch_id,
             # M5 起这里含两次覆盖整批文章的 LLM 调用（聚类+打标），30s 是 M1 纯 Python
             # 版本的遗留值，真实批次（100+ 篇）单次调用就可能超过 30s，留够余量。
             start_to_close_timeout=timedelta(seconds=180),
@@ -182,7 +185,7 @@ class AInewsPipelineWorkflow:
         )
 
         return {
-            "batch_id": params.batch_id,
+            "batch_id": batch_id,
             "sources_attempted": len(active_sources),
             "sources_failed": source_failures,
             "fetched": len(entries),

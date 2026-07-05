@@ -42,14 +42,15 @@ class SourceConfig(BaseModel):
 
 
 class PipelineParams(BaseModel):
-    """AInewsPipelineWorkflow 的入参：batch_id 由 Celery Beat 触发时生成
-    （依赖真实时钟，workflow 内部不允许自己生成，必须外部传入）。
+    """AInewsPipelineWorkflow 的入参：batch_id 可选，留空时 workflow 内部用
+    workflow.info().start_time 兜底生成（M7 起由 Temporal Schedule 触发，不再依赖
+    Celery Beat 在 workflow 外部生成再传入）；手动触发 ad-hoc 批次时仍可显式指定。
 
     M3 起不再带 source_name——一次 pipeline 运行会对 sources.yaml 里全部活跃源做
     fetch fan-out（03 doc 的既定架构：fetch_activity × N，N=活跃源数），不是针对单一源。
     """
 
-    batch_id: str
+    batch_id: str | None = None
 
 
 class ListingEntry(BaseModel):

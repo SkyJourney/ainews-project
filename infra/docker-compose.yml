@@ -34,26 +34,6 @@ services:
     networks:
       - ainews
 
-  redis:
-    image: redis:7-alpine
-    container_name: ainews-service-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    environment:
-      TZ: Asia/Shanghai
-    ports:
-      # 宿主机 6379 同样已被占用，改用 16379。
-      - "${REDIS_PORT:-16379}:6379"
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks:
-      - ainews
-
   temporal:
     image: temporalio/auto-setup:1.24
     container_name: ainews-service-temporal
@@ -86,10 +66,30 @@ services:
     networks:
       - ainews
 
-  # temporal-worker / celery-worker / celery-beat 三个服务共用同一个 backend 镜像
-  # （只有 command 不同）。build 只在 temporal-worker 声明一次；`docker compose build`
-  # 或 `up --build` 跑一次即可打出 ainews-service/backend:<tag> 这个带版本的镜像，
-  # 另外两个服务直接复用，不必各自重复声明 build。
+  # M7：每日 pg_dump 快照 + 按保留天数清理旧备份（04 §2.8）。只做快照，不上 WAL
+  # 归档做 PITR——纯资讯聚合内容，可接受"最多丢失一天"的 RPO，见 decisions.md。
+  postgres-backup:
+    image: postgres:16-alpine
+    container_name: ainews-service-postgres-backup
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/scripts/pg_backup.sh"]
+    environment:
+      TZ: Asia/Shanghai
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER:-ainews}
+      POSTGRES_DB: ${POSTGRES_DB:-ainews_content}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./scripts/pg_backup.sh:/scripts/pg_backup.sh:ro
+      - backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ainews
+
+  # M7 起定时触发改用 Temporal 原生 Schedule（worker 启动时自 ensure 一次每日 09:00
+  # Asia/Shanghai 的 schedule），不再需要 celery-worker/celery-beat/redis 三个服务。
   temporal-worker:
     build:
       context: ../backend
@@ -113,37 +113,6 @@ services:
       temporal:
         condition: service_started
       db:
-        condition: service_healthy
-    networks:
-      - ainews
-
-  celery-worker:
-    image: ainews-service/backend:${BACKEND_IMAGE_TAG:-0.1.0}
-    container_name: ainews-service-celery-worker
-    restart: unless-stopped
-    command: celery -A beat.celery_app worker -l info
-    environment:
-      TZ: Asia/Shanghai
-      TEMPORAL_HOST: temporal:7233
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      redis:
-        condition: service_healthy
-      temporal-worker:
-        condition: service_started
-    networks:
-      - ainews
-
-  celery-beat:
-    image: ainews-service/backend:${BACKEND_IMAGE_TAG:-0.1.0}
-    container_name: ainews-service-celery-beat
-    restart: unless-stopped
-    command: celery -A beat.celery_app beat -l info
-    environment:
-      TZ: Asia/Shanghai
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      redis:
         condition: service_healthy
     networks:
       - ainews
@@ -181,5 +150,5 @@ networks:
 
 volumes:
   pgdata:
-  redisdata:
   images:
+  backups:

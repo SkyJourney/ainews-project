@@ -7,8 +7,6 @@
 # 不要手改单个版本号猜兼容性。
 
 temporalio==1.30.0
-celery==5.6.3
-redis==8.0.1
 sqlalchemy==2.0.51
 alembic==1.18.5
 psycopg[binary]==3.3.4
