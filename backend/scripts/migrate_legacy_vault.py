@@ -467,6 +467,47 @@ def plan_digests(plan: MigrationPlan) -> None:
 # 收尾：wikilink 解析——按"这次迁移完成后哪些 id 真实存在"过滤+重写
 # ---------------------------------------------------------------------------
 
+def build_old_to_new_original_id_mapping() -> dict[str, str]:
+    """扫一遍 60-Originals/ 计算"旧文件名 → 新 hash id"映射，纯读取 vault 文件、不查
+    数据库、不做任何写入。`plan_originals()` 规划迁移时会顺带算出同一份映射（因为它
+    要挨个判断每个文件对应的新 id 是否已存在），但那个函数还耦合了 PlannedDoc 组装、
+    `document_id_exists` 查询等一堆和"仅仅需要这份映射"无关的工作。
+
+    这份独立版本是给 `repair_m8_legacy_data.py` 用的：那边只需要在重算 Daily/Digest
+    正文时重新做 wikilink 改写，不需要（也不应该）重新跑一遍完整的迁移规划。
+    """
+    mapping: dict[str, str] = {}
+    for path in sorted((VAULT_ROOT / "60-Originals").glob("*.md")):
+        try:
+            fm, _ = parse_frontmatter(path)
+        except Exception:  # noqa: BLE001 - 解析失败的文件对映射没有贡献，跳过即可
+            continue
+        url = fm.get("source_url")
+        if url:
+            mapping[path.stem] = original_doc_id(url)
+    return mapping
+
+
+def rewrite_original_wikilinks(body_md: str, old_to_new_original_id: dict[str, str]) -> str:
+    """把正文里引用旧 Original 文件名的 wikilink 文本改写成新 hash id——只有 Original
+    类型需要这一步重写（Zettel/Topic id 格式两边一致，不用改）。
+
+    这是从 `resolve_links()` 抽出来的独立函数：`repair_m8_legacy_data.py` 重算 Daily/
+    Digest 正文时如果只做标题/元数据块裁剪、不重新走这一步，会让已经改写正确的
+    wikilink 被没改写过的旧文本覆盖回去——这是真实发生过的 bug（3 篇 Daily、133 处
+    链接断链，见 .claude/memory/known_issues.md），根源就是两处"重算正文"的逻辑没有
+    共用同一个改写步骤。
+    """
+    if not old_to_new_original_id:
+        return body_md
+
+    def _sub(m: re.Match) -> str:
+        new_id = old_to_new_original_id.get(m.group(1))
+        return f"[[{new_id}]]" if new_id else m.group(0)
+
+    return WIKILINK_RE.sub(_sub, body_md)
+
+
 def resolve_links(plan: MigrationPlan) -> None:
     """两件事：① Original 类型的旧 id 引用必须重写成新 hash id（文本层面真的要替换，
     否则前端 wikilink 解析找不到对应文档）；② 其余类型 id 格式不变，只需要判断目标在
@@ -480,13 +521,7 @@ def resolve_links(plan: MigrationPlan) -> None:
 
     for doc in plan.docs:
         # Original 引用重写（只有 Daily/Zettel/Topic 的正文可能引用旧 Original 文件名）
-        if plan.old_to_new_original_id:
-            def _sub(m: re.Match) -> str:
-                target = m.group(1)
-                new_id = plan.old_to_new_original_id.get(target)
-                return f"[[{new_id}]]" if new_id else m.group(0)
-
-            doc.body_md = WIKILINK_RE.sub(_sub, doc.body_md)
+        doc.body_md = rewrite_original_wikilinks(doc.body_md, plan.old_to_new_original_id)
 
         resolved_targets = []
         for raw_target in doc.raw_link_targets:

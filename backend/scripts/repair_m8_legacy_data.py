@@ -16,6 +16,18 @@
 = true 的文档（M8 迁移写入的那批），逐条重算受影响字段并整行 upsert 回写；title/doc_type
 均保持不变。默认 dry-run 打印"修改前 → 修改后"对照表，`--execute` 才真正写库。
 
+**本次追加修复（第 5 个 bug，2026-07-05 用户实测发现）**：`repair_dailies()`/
+`repair_digests()` 最初重算正文时只调了 `strip_leading_title_block()`，没有重新走
+`migrate_legacy_vault.py::resolve_links()` 那一步"旧 Original 文件名 wikilink → 新
+hash id"的改写。首次迁移时这一步是做对的，但 repair 脚本用"直接读 vault 原始文件
+重算"的方式对比差异——只要正文里有改写过的 wikilink，重算结果就必然跟已经改写正确
+的现有正文不一致，从而被误判为"需要修复"并用没改写过的旧文本覆盖回去，等于把
+resolve_links() 的成果撤销了。实测影响：3 篇 Daily（2026-07-02/03/04）、133 处
+wikilink 100% 断链，其中 arxiv-api/huggingface-daily-papers 来源占比最高。修复：
+两个函数重算正文时补上 `rewrite_original_wikilinks()` 这一步（与 `resolve_links()`
+共用同一个函数，不是各写一份），且本脚本天然幂等——重跑一次就能同时把已经跑错的
+3 篇 Daily 修正回来，不需要额外的一次性脚本。
+
 用法（在 backend/ 目录下）：
     ~/miniconda3/envs/ainews-service/bin/python3 -m scripts.repair_m8_legacy_data
     ~/miniconda3/envs/ainews-service/bin/python3 -m scripts.repair_m8_legacy_data --execute
@@ -32,9 +44,11 @@ from scripts.migrate_legacy_vault import (
     _content_hash,
     _count_topic_entries,
     _parse_legacy_date,
+    build_old_to_new_original_id_mapping,
     extract_gist,
     original_doc_id,
     parse_frontmatter,
+    rewrite_original_wikilinks,
     strip_leading_title_block,
 )
 from worker.db import aggregate_get_document, get_engine, upsert_document
@@ -149,14 +163,16 @@ def repair_topics(execute: bool) -> list[dict]:
     return changes
 
 
-def repair_dailies(execute: bool) -> list[dict]:
+def repair_dailies(execute: bool, old_to_new_original_id: dict[str, str]) -> list[dict]:
     """stats 键名对齐权威 schema：entry_count → articles_processed，补 topics_touched；
-    body_md 同 Original，重新剥离标题下残留的元数据行。"""
+    body_md 同 Original，重新剥离标题下残留的元数据行——**并重新走 wikilink 改写**
+    （否则会把已经改写正确的旧 Original 引用覆盖回断链的旧文件名，见本文件顶部说明）。
+    """
     changes = []
     for doc in _migrated_docs("daily"):
         path = VAULT_ROOT / "10-Daily" / f"{doc['id']}.md"
         _, raw_body = parse_frontmatter(path)
-        correct_body = strip_leading_title_block(raw_body)
+        correct_body = rewrite_original_wikilinks(strip_leading_title_block(raw_body), old_to_new_original_id)
 
         old_stats = doc["frontmatter"].get("stats") or {}
         needs_stats_fix = "articles_processed" not in old_stats
@@ -176,7 +192,7 @@ def repair_dailies(execute: bool) -> list[dict]:
             diff["stats"] = (old_stats, new_stats)
             new_fm["stats"] = new_stats
         if needs_body_fix:
-            diff["body_md"] = ("...（正文残留元数据行）", "...（已剥离）")
+            diff["body_md"] = ("...（残留元数据行 / 断链的旧 Original wikilink）", "...（已剥离 / 已改写为新 id）")
 
         changes.append({"doc_id": doc["id"], "doc_type": "daily", "diff": diff})
         if execute:
@@ -192,9 +208,10 @@ def repair_dailies(execute: bool) -> list[dict]:
     return changes
 
 
-def repair_digests(execute: bool) -> list[dict]:
-    """body_md：同 Original/Daily，重新剥离标题下残留的元数据行（Digest 没有 word_count/
-    gist/stats 这类字段问题，只有这一项）。"""
+def repair_digests(execute: bool, old_to_new_original_id: dict[str, str]) -> list[dict]:
+    """body_md：同 Original/Daily，重新剥离标题下残留的元数据行 + 重新走 wikilink 改写
+    （Digest 没有 word_count/gist/stats 这类字段问题，只有这一项；现存 Digest 实测没有
+    嵌入过旧 Original wikilink，这里是防御性处理，避免以后出现同款回归）。"""
     changes = []
     for doc in _migrated_docs("digest"):
         date_str = doc["id"].removeprefix("digest-")
@@ -202,7 +219,7 @@ def repair_digests(execute: bool) -> list[dict]:
         if not path.exists():
             continue
         _, raw_body = parse_frontmatter(path)
-        correct_body = strip_leading_title_block(raw_body)
+        correct_body = rewrite_original_wikilinks(strip_leading_title_block(raw_body), old_to_new_original_id)
         if doc["body_md"] == correct_body:
             continue
 
@@ -238,11 +255,12 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true", help="真正写入数据库（默认只 dry-run 打印对照表）")
     args = parser.parse_args()
 
+    old_to_new_original_id = build_old_to_new_original_id_mapping()
     all_changes = {
         "original": repair_originals(args.execute),
         "topic": repair_topics(args.execute),
-        "daily": repair_dailies(args.execute),
-        "digest": repair_digests(args.execute),
+        "daily": repair_dailies(args.execute, old_to_new_original_id),
+        "digest": repair_digests(args.execute, old_to_new_original_id),
     }
     print_report(all_changes)
     total = sum(len(v) for v in all_changes.values())
