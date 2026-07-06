@@ -7,6 +7,7 @@ activity_executor，否则报错）。workflow 与 activity 之间会传递 pyda
 """
 
 import asyncio
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -37,7 +38,10 @@ from worker.fetch import (
 from worker.filter import filter_activity
 from worker.schemas import PipelineParams
 from worker.workflows import AInewsPipelineWorkflow, EnrichArticleWorkflow
-from worker.write import write_activity
+
+# write_activity（worker/write.py）从 2026-07-06 起不再单独注册为 Temporal activity——
+# aggregate_activity 内部直接调用它（普通函数调用，见 aggregate.py 顶部说明），不需要
+# workflow 再单独调度一次。
 
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "ainews-task-queue"
@@ -70,12 +74,20 @@ async def ensure_pipeline_schedule(client: Client) -> None:
 
 
 async def main() -> None:
+    # 此前完全没有配置 logging，activity.logger/workflow.logger 的调用（含 enrich.py 的
+    # [chunk_diag] 诊断日志）和 Temporal SDK 自身的内部日志都被静默丢弃，`docker logs`
+    # 看不到任何应用层信息，排查真实批次问题时完全没有可用线索（2026-07-06 排查
+    # aggregate_activity 反复超时时发现这个缺口）。
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     client = await Client.connect(TEMPORAL_HOST, data_converter=pydantic_data_converter)
     await ensure_pipeline_schedule(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[AInewsPipelineWorkflow, EnrichArticleWorkflow],
+        workflows=[
+            AInewsPipelineWorkflow,
+            EnrichArticleWorkflow,
+        ],
         activities=[
             preflight_activity,
             fetch_activity,
@@ -88,7 +100,6 @@ async def main() -> None:
             metadata_activity,
             upsert_article_activity,
             aggregate_activity,
-            write_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=MAX_ACTIVITY_WORKERS),
         max_concurrent_activities=MAX_ACTIVITY_WORKERS,

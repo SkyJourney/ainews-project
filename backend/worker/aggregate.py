@@ -38,6 +38,7 @@ from worker.filter import normalize_url_for_index
 from worker.llm_client import call_structured
 from worker.schemas import ClusterAssignment, DailyHighlights, TagAssignment
 from worker.source_registry import load_sources
+from worker.write import write_activity
 
 MAX_SLUG_WORDS = 5
 MAX_ID_COLLISION_RETRIES = 60
@@ -100,9 +101,16 @@ SPLIT_SUGGESTION_THRESHOLD = 8
 ZETTEL_YIELD_SOFT_MIN = 3
 ZETTEL_YIELD_SOFT_MAX = 10
 
-_CLUSTER_MODEL = "deepseek-v4-flash"
-_TAG_MODEL = "deepseek-v4-flash"
-_DAILY_HIGHLIGHT_MODEL = "deepseek-v4-flash"
+# 2026-07-06：从 deepseek-v4-flash 换成 qwen3.6-flash。真实批次排查 aggregate_activity
+# 反复超时（180s→360s→900s 均不够）时，用 py-spy 对卡住的线程做实时栈追踪，确认线程
+# 一直阻塞在等待这几个聚类/打标调用的 HTTP 响应上（不是代码 bug、不是连接池/线程池/
+# workflow 历史膨胀——这几类假设均已用对照实验排除），且同一时刻对网关发起的其他简单
+# 请求秒级返回，说明不是网关整体故障，是 deepseek-v4-flash 处理这类批量结构化调用偶发
+# 异常慢。实测 qwen3.6-flash 用同样的 ClusterAssignment schema 能正常返回结构化结果，
+# 换用它规避这个问题（见 .claude/memory/decisions.md）。
+_CLUSTER_MODEL = "qwen3.6-flash"
+_TAG_MODEL = "qwen3.6-flash"
+_DAILY_HIGHLIGHT_MODEL = "qwen3.6-flash"
 # 聚类/打标调用的输出条目数随批次规模线性增长，真实批次实测 136 篇一次性调用触发
 # instructor.IncompleteOutputException（超过 max_tokens 被截断）——单纯调高 max_tokens
 # 只是把问题推迟到更大的批次，改成分块调用（沿用 enrich.py 翻译阶段"按段落分块"的既有
@@ -682,11 +690,30 @@ def _run_tag_assignment_chunk(articles: list[dict]) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 @activity.defn
-def aggregate_activity(batch_id: str) -> list[dict]:
+def aggregate_activity(batch_id: str) -> dict:
+    """聚类/打标/组装文档记录后，直接在本 activity 内部调用 write_activity 完成落库
+    （2026-07-06 起，不再作为独立 Temporal activity 由 workflow 调度）。
+
+    背景：此前 aggregate_activity 只负责组装 records 并通过 Temporal 返回给
+    workflow，再由 workflow 另起一个 write_activity 调用把 records 传进去写库——
+    这个"组装好的 records 在 aggregate_activity 的返回值 + write_activity 的入参
+    两处被完整序列化、经 gRPC 传递"的设计，在 records 只含摘要级正文（1-2KB/篇）时
+    没问题；arxiv 全文抓取修复后单篇正文常见 2-7 万字符，真实批次（101 条记录）
+    的 records 序列化后达到 4.3MB，超过 Temporal gRPC 消息上限（4MB），导致
+    "activity 完成"信号发不出去——从 workflow 角度看就是 activity 一直不返回直到
+    超时（真实排查过程见 .claude/memory/decisions.md，用 py-spy 对卡住的线程做了
+    实时栈追踪，排除了模型/连接池/并发等其他假设，最终定位到这里）。
+
+    修复：records 只在本 activity 内部产生和消费，从不经过 Temporal 的序列化/传输
+    层，只把一个不含正文的小 summary 返回给 workflow。04-roadmap.md 里
+    "aggregate_activity（批量）→ write_activity（upsert）"两步的文档化流水线形状
+    相应改为一步（write_activity 函数本身保留在 write.py，供本模块直接调用，
+    不再单独注册为 Temporal activity）。
+    """
     articles = fetch_enriched_articles(batch_id)
     if not articles:
         activity.logger.info(f"aggregate_activity: batch_id={batch_id} 没有已完成富化的文章，跳过")
-        return []
+        return {"written": 0}
 
     today = date.today()
     existing_topics = set(aggregate_list_topic_slugs())
@@ -753,4 +780,12 @@ def aggregate_activity(batch_id: str) -> list[dict]:
             f"aggregate_activity: 本批次仅新建 {new_zettel_count} 张原子笔记，低于建议下限 "
             f"{ZETTEL_YIELD_SOFT_MIN}，可能是「低产日」（可接受）"
         )
-    return records
+
+    # records（含全文正文）只在本 activity 内部消费，直接调用 write_activity 落库，
+    # 不经过 Temporal 的序列化/传输层——见函数顶部说明。
+    written = write_activity(records)
+    return {
+        "written": written,
+        "new_topics": new_topic_count,
+        "new_zettels": new_zettel_count,
+    }

@@ -29,7 +29,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from worker.filter import filter_activity
     from worker.schemas import EnrichArticleParams, PipelineParams
-    from worker.write import write_activity
 
 
 @workflow.defn
@@ -175,21 +174,16 @@ class AInewsPipelineWorkflow:
         for failure in enrich_failures:
             workflow.logger.warning(f"EnrichArticleWorkflow 失败（不影响其余文章）: {failure}")
 
-        records = await workflow.execute_activity(
+        aggregate_result = await workflow.execute_activity(
             aggregate_activity,
             batch_id,
-            # M5 起这里含两次覆盖整批文章的 LLM 调用（聚类+打标），30s 是 M1 纯 Python
-            # 版本的遗留值，真实批次（100+ 篇）单次调用就可能超过 30s，留够余量。
-            start_to_close_timeout=timedelta(seconds=180),
-            retry_policy=default_retry,
-        )
-
-        written = await workflow.execute_activity(
-            write_activity,
-            records,
-            # M5 起每条记录（original/zettel/topic/daily/digest）都要 upsert+同步
-            # tags/links，真实批次记录数比 M1-M4 明显增多，留够余量。
-            start_to_close_timeout=timedelta(seconds=90),
+            # 2026-07-06 起 aggregate_activity 内部直接调用 write_activity 完成落库
+            # （不再是两个独立 activity，见 aggregate.py::aggregate_activity 顶部
+            # 说明——records 含全文正文经 gRPC 传递会超过 Temporal 4MB 消息上限）。
+            # 超时相应覆盖"聚类+打标 LLM 调用"与"upsert+同步 tags/links"两段耗时：
+            # M5 起两次覆盖整批文章的 LLM 调用（聚类+打标）+ 每条记录的写库同步，
+            # 真实批次（100+ 篇、documents 表 400+ 条）实测过 360s 不够用，调到 600s。
+            start_to_close_timeout=timedelta(seconds=600),
             retry_policy=default_retry,
         )
 
@@ -200,7 +194,7 @@ class AInewsPipelineWorkflow:
             "fetched": len(entries),
             "kept": len(kept),
             "enrich_failed": len(enrich_failures),
-            "written": written,
+            "written": aggregate_result["written"],
         }
 
     @staticmethod

@@ -149,19 +149,17 @@ def _pipeline_activities(recorder: _Recorder, *, failing_source: str | None = No
         recorder.calls.append("upsert_article")
 
     @activity.defn(name="aggregate_activity")
-    async def aggregate(batch_id: str) -> list[dict]:
+    async def aggregate(batch_id: str) -> dict:
+        # 2026-07-06 起 aggregate_activity 内部直接调用 write_activity（不再是
+        # workflow 调度的独立 activity，见 aggregate.py 顶部说明），mock 版本只需要
+        # 反映新的返回形状。
         recorder.calls.append("aggregate_activity")
-        return []
-
-    @activity.defn(name="write_activity")
-    async def write(records: list[dict]) -> int:
-        recorder.calls.append("write_activity")
-        return len(records)
+        return {"written": 0, "new_topics": 0, "new_zettels": 0}
 
     return [
         list_sources, preflight, fetch, record_health, filter_,
         fetch_original, translate, gist, metadata, upsert_article,
-        aggregate, write,
+        aggregate,
     ]
 
 
@@ -238,6 +236,6 @@ async def test_single_article_enrich_failure_does_not_block_others(env):
     assert result["kept"] == 2
     # 另一篇文章（source-b）应该正常走完 upsert
     assert "upsert_article" in recorder.calls
-    # aggregate/write 依然要跑完整个批次，不因为一篇文章失败而中断整条流水线
+    # aggregate（内部含 write）依然要跑完整个批次，不因为一篇文章失败而中断整条流水线
     assert "aggregate_activity" in recorder.calls
-    assert "write_activity" in recorder.calls
+    assert result["written"] == 0  # mock aggregate 固定返回 written=0
