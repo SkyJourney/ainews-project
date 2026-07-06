@@ -120,3 +120,13 @@ M8 完成后同一天做的一次全量工程审查发现，`migrate_legacy_vaul
 
 - 迁移是一次性操作，不是常态化任务，执行完成后不需要保留迁移脚本的持续运行能力（区别于 `postgres-backup` 这类常驻服务）；`backend/scripts/migrate_legacy_vault.py` 保留在仓库里作为历史记录/未来同类迁移的参考，不会被定时调用
 - 迁移前的快照（`ainews_content-pre-m8-migration-*.dump`）保留在 `postgres-backup` 的常规保留策略内，会在 `BACKUP_RETENTION_DAYS`（默认 14 天）后被自动清理
+
+## 追加：`repair_m8_legacy_data.py` 本身引入了一个真实回归——Daily 正文的 wikilink 改写被撤销（2026-07-06，用户报告后排查修复）
+
+用户报告"迁移过来的 daily 很多原文链接都是断的"。排查发现：`repair_dailies()`/`repair_digests()`（上面第 4 类 bug 的修复脚本）重算正文时只调用了 `strip_leading_title_block()`，没有重新走 `migrate_legacy_vault.py::resolve_links()` 那一步"旧 Original 文件名 wikilink → 新 hash id"的改写。首次迁移时这一步是做对的（`links` 表当时也确实记录了正确反链），但 repair 脚本用"直接读 vault 原始文件重算"的方式跟数据库里"已经改写过 wikilink 的正文"比较差异——只要正文里有改写过的 wikilink，两者就必然不同（差异根本不是 `re.MULTILINE` 那个 bug，而是 wikilink 改没改写），触发"需要修复"的误判，进而用没改写过的旧文本覆盖了原本正确的内容。
+
+**实测影响**：3 篇 Daily（2026-07-02/03/04）、133 处 wikilink 100% 断链，其中 `arxiv-api`/`huggingface-daily-papers` 来源占比最高。
+
+**修复**：`migrate_legacy_vault.py` 新增 `build_old_to_new_original_id_mapping()`/`rewrite_original_wikilinks()`（从 `resolve_links()` 抽出的独立复用函数），`repair_dailies()`/`repair_digests()` 重算正文时补上这一步；`repair_m8_legacy_data.py` 本身天然幂等（按当前 DB 状态与重算结果的差异判断要不要写），重跑一次就同时修正了已经跑错的 3 篇 Daily，不需要额外的一次性脚本。断链统计重跑归零，验证收敛。
+
+**How to apply**：任何"重算正文再跟现有内容比较差异"的修复脚本，重算逻辑必须复用完整的原始处理链路（不能只挑其中一步），否则重算结果会跟"经过完整链路处理的现有正确内容"产生虚假差异，被误判为需要修复并回退。

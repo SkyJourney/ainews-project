@@ -20,7 +20,7 @@
 
 - [x] 执行顺序：同批次去重 → 跨源同论文去重 → 时效过滤 → 信噪比过滤 → 跨日去重（`backend/worker/filter.py` `filter_activity`）
 - [x] 同批次去重补全 4 级优先：①URL 完全相同 ②host+path 相同 ③标题 Jaccard 相似度≥0.85 ④摘要前 100 字 Jaccard 重叠≥0.9（命中即判重复，保留信息最完整一条——完整度按"有发布日期/摘要更长/非 low_confidence"打分）
-- [x] 跨源同论文去重：范围限 `arxiv-api`/`huggingface-daily-papers`，标题归一化（小写去标点）后精确相等即合并，保留 arxiv.org 规范链接源版本，其余并入 `also_reported_by`（Stage C 修正：同一个源自己内部撞车不算跨源，不计入 `also_reported_by`）
+- [x] 跨源同论文去重：范围限 `arxiv-api`/`huggingface-daily-papers`，标题归一化（小写去标点）后精确相等即合并，保留 arxiv.org 规范链接源版本，其余直接丢弃（Stage C 修正：同一个源自己内部撞车不算跨源）。`also_reported_by` 记账字段全链路无消费方，全量审查后已删除（2026-07-05，见 `.claude/memory/decisions.md`）
 - [x] 时效过滤：单一阈值，发布日期距今 >14 天丢弃，不分来源等级
 - [x] 信噪比过滤表：丢弃类别（融资 PR/招聘/活动/广告/VC 软文/二手编译正则）+ 保留信号（arxiv.org/github.com/huggingface.co 域名 + benchmark/SOTA/开源/政策/安全对齐关键词）覆盖所有丢弃规则
 - [x] 模糊地带兜底：沿用 low_confidence 字段承载，过滤阶段不主动新增判断，交聚类阶段

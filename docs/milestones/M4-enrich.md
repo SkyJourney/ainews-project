@@ -61,3 +61,20 @@ M4 验收时翻译降级率是 9.5%（168 篇里 16 篇 `translation_fallback_no
 **明确不追的 2 类**：品牌名密度导致的临界失败（旧项目 `news-originalizer.md` 同样没有豁免逻辑）；`state-of-ai-report` 历史 Edition 落地页（`url_index` 显示这类页面摘要恒为空，跨日去重会在第二天自动丢弃，不是持续复发问题）。
 
 **验收**：全新全量批次（清空表、真实走完整 Temporal 流水线）：144 篇，0 enrich_failed，**0 篇最终降级**（原始诊断批次 17/146=11.6%）。复审机制用正负样本各测过一次确认不是橡皮图章；重试上限调整依据是同一原文独立重跑三次结果不一致，证明是模型随机性而非内容结构性问题。
+
+## 追加：arxiv 来源只抓到摘要，未拿到全文（2026-07-06，用户报告后排查修复）
+
+用户报告"arxiv 文章明显有问题"，排查发现：`_fetch_direct` 请求 `arxiv.org/abs/<id>`（论文摘要页）从 M2-M4 接入 arxiv-api 起就从未变过，但这个页面本身只有几百字摘要 + "查看PDF/全文链接/许可"侧边栏文字，从来不含论文全文——真实生产数据验证：全部 83 篇非迁移 arxiv Original 无一例外只有摘要（255-979 字），M4 验收时的"0 enrich_failed"没有把这个问题暴露出来，因为它没有失败，只是内容偏薄。migrate_legacy_vault.py 迁移进来的旧系统 arxiv 内容之所以是全文，是旧系统（另一代码库）走了不同的抓取端点，跟新系统这次的 bug 无关。
+
+**根因**：arXiv 另有全文 HTML 渲染服务（`arxiv.org/html/<id>`），但不保证一定存在——论文提交后渲染有延迟（实测提交 3 天后 88% 可用），复杂 LaTeX/图表也可能永久渲染失败。新系统的抓取代码从未尝试过这个端点。
+
+**修复**（`backend/worker/enrich.py`）：
+- `_try_arxiv_fulltext`：`_fetch_direct` 内部优先尝试改写成 `/html/<id>` 抓取，404/失败静默回退到原有的 `/abs/`→Jina→Playwright 兜底链路，不影响非 arxiv 来源
+- `_ARXIV_LEADING_H1_RE`/`_clean_arxiv_abs_markdown`：全文页与摘要页抓取内容都自带一份论文标题，与 `documents.title` 字段重复导致"标题渲染两遍"（M6 修过 `aggregate.py` 自己拼标题的同款问题，这次是抓取源内容自带的）；摘要页额外有一段带 4+ 空格缩进的"全文链接/访问论文"侧边栏噪声，缩进会被 markdown 解释成代码块导致图片/标题语法原样显示成文字（真实截图复现过），按已知结构整体清洗
+- `_ICON_SRC_PATTERNS` 补充 arxiv 全文页的静态资源路径模式（`/static/base/.../images/`，跟摘要页的 `/static/browse/.../icons/` 不是同一套），避免 arXiv 官方 logo/吉祥物图标被当正文配图误抓
+- `_chunk_paragraphs`：单个段落超过 `max_chars` 时硬切——全文版论文常见没有空行分隔的超长参考文献列表/附录，整段塞进一个分块会导致翻译输出被 `max_tokens` 截断触发 `IncompleteOutputException`，真实批次实测过程序崩溃
+- `translate_activity` 分块翻译改并发（`ThreadPoolExecutor`，`_CHUNK_TRANSLATE_CONCURRENCY=6`）：全文版论文常见 30-50 个分块，顺序翻译单篇要十几分钟，`workflows.py` 的 `translate_activity`/`fetch_original_activity` 超时相应从 300s/150s 调到 600s/240s；单块翻译异常不再让整篇崩溃，降级为保留原文并在 `fallback_notice` 里显式记录失败分块数
+
+**重跑**：`backend/scripts/refetch_arxiv_originals.py`（新增一次性脚本，核对 arXiv API 源头存在性 → 重抓 → 重翻译 → 重算字数/摘要 → upsert，`arxiv_fulltext_refetched` 标记支持断点续跑）对全部 83 篇重新处理，平均字数从约 600（摘要）提升到 **20,402**（71/83 命中全文，12 篇因论文本身没有 HTML 渲染仍是摘要）。过程中因瞬时网络问题中断过 2 次，断点续跑机制正常工作。
+
+**连带发现并修复的独立问题**：前端 `rehype-sanitize`（全量工程审查新增）不认识 `ainews-media://` 自定义协议，会把本地图片 `src` 整个清空——这是全站性回归（M6 之后所有带本地图片的文档都受影响），不是本次 arxiv 改动引入的。修复：`markdown-render.ts` 把 URL 改写挪到 sanitize 之前。详见 `.claude/memory/known_issues.md`。
