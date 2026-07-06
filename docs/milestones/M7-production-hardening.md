@@ -69,3 +69,11 @@
 ### 待观察：7 天连续运行
 
 开发工作全部完成，但验收标准的"连续运行 7 天不需要人工干预"是观察期而非开发任务，观察起始日期 2026-07-05。观察期内需要留意：每日 09:00 Schedule 是否按时触发、`written` 记录数是否稳定在合理区间、`postgres-backup` 是否每天成功——满足后再考虑退役旧 AInews 的 Desktop Scheduled Task 并把本里程碑状态改为"已完成"。
+
+### 观察期真实故障：`aggregate_activity` 反复超时（gRPC 4MB 消息上限），已定位并修复（2026-07-06）
+
+观察期第二天，`ainews-pipeline-daily` 当天批次连续 3 次执行到 `aggregate_activity` 就超时失败（180s→360s→900s 逐次调大仍不够）。按用户要求走了一遍系统性排查（不满足于"调大超时"这种表面缓解）：先用一个不含真实业务逻辑的诊断 workflow（`worker/diag.py`，排查完已删除）逐一排除工作流历史膨胀、线程池饱和、大payload传递、共享 HTTP 连接池退化几个假设；最后用 `py-spy` 对卡住的线程做实时栈追踪，确认线程确实阻塞在等待真实 LLM 网络响应（不是 bug），一度怀疑是模型（`deepseek-v4-flash`）慢，切到 `qwen3.6-flash` 后单次测试"看似"解决——但坚持看完整、不加过滤的容器日志后，找到了真正的根因：`aggregate_activity` 实际每次都执行成功，但其返回值（101 条记录，含 arxiv 全文正文）序列化后达 4,327,723 字节，超过 Temporal gRPC 硬性消息上限 4,194,304 字节（4MB），触发 `ResourceExhausted`（`"grpc: received message after decompression larger than max"`），导致"activity 完成"信号发不出去——从 workflow 角度看就是一直挂起直到 `StartToClose` 超时。这个风险其实在 M5 验收时就已经被 `PayloadSizeWarning`（1.16MB，见 [M5-aggregate.md](./M5-aggregate.md) "已知的后续关注项"）预警过，当时判断"尚未触及硬上限，暂不处理"，随着 arxiv 全文抓取修复（单篇正文从 KB 级涨到 2-7 万字符）真实触发。
+
+**修复**：`aggregate_activity` 与 `write_activity` 合并为一个 Temporal activity——records（含全文正文）只在 `aggregate_activity` 内部产生和消费，`write_activity` 改为普通函数调用（不再单独注册为 Temporal activity），只把不含正文的小 summary（`{"written", "new_topics", "new_zettels"}`）返回给 workflow，彻底避免大 payload 跨 Temporal 序列化边界。
+
+**真实验证**：重建 `temporal-worker` 镜像并重启后，手动触发一次完整批次（`batch_id='2026-07-06-manual-verify'`，同时补跑了当天因故障缺失的数据）：`sources_attempted=14`/`sources_failed=0`/`fetched=1366`/`kept=95`/`enrich_failed=4`/`written=112`，workflow 从 `RUNNING` 正常流转到 `COMPLETED`；完整日志核查确认没有再出现 `ResourceExhausted`/gRPC 相关报错；`documents` 表按 `updated_at` 核实新增 91 original + 8 zettel + 11 topic + 1 daily + 1 digest = 112 条，与返回值完全对应。验证通过后恢复了排查期间暂停的 `ainews-pipeline-daily` Schedule。详见 `.claude/memory/decisions.md`「aggregate_activity/write_activity 合并修复 gRPC 4MB 消息上限」。

@@ -76,7 +76,7 @@ M1-M4 遗留的 `aggregate.py` 用"zettel"顶替了 04 §2.6 五类文档里"Ori
 
 ### 真实批次超时配置修正
 
-`aggregate_activity`/`write_activity` 的 Temporal activity 超时沿用的是 M1 纯 Python 版本的 30 秒遗留值——M5 起 `aggregate_activity` 含多次覆盖整批文章的 LLM 调用，`write_activity` 要为大幅增多的记录数（five 类文档）逐条 upsert+同步 tags/links，30 秒在真实批次下必然超时。分别调到 180 秒 / 90 秒。
+`aggregate_activity`/`write_activity` 的 Temporal activity 超时沿用的是 M1 纯 Python 版本的 30 秒遗留值——M5 起 `aggregate_activity` 含多次覆盖整批文章的 LLM 调用，`write_activity` 要为大幅增多的记录数（five 类文档）逐条 upsert+同步 tags/links，30 秒在真实批次下必然超时。分别调到 180 秒 / 90 秒。（**2026-07-06 起两个 activity 合并为一个**，超时相应合并为单个 600 秒，见下方"已知的后续关注项"。）
 
 ### 测试基建（工程化收敛，M0-M4 全靠真实批次验证，从未有过单元测试）
 
@@ -88,7 +88,7 @@ M1-M4 遗留的 `aggregate.py` 用"zettel"顶替了 04 §2.6 五类文档里"Ori
 
 ### 已知的后续关注项（不阻塞本里程碑）
 
-- `aggregate_activity` 的返回值（含全部文档的完整 `body_md`）触发过 Temporal `PayloadSizeWarning`（真实批次达 1.16MB，警告阈值 512KB）——尚未达到 Temporal 的硬性消息大小上限，暂不处理，但如果未来批次规模继续增长，需要考虑减少跨 activity 传递的数据量（如只传 doc_id 列表，body_md 直接在 activity 内部读写）。
+- ~~`aggregate_activity` 的返回值（含全部文档的完整 `body_md`）触发过 Temporal `PayloadSizeWarning`（真实批次达 1.16MB，警告阈值 512KB）——尚未达到 Temporal 的硬性消息大小上限，暂不处理，但如果未来批次规模继续增长，需要考虑减少跨 activity 传递的数据量（如只传 doc_id 列表，body_md 直接在 activity 内部读写）。~~ **已在 M7 观察期真实触发并修复（2026-07-06）**：arxiv 全文抓取修复后单篇正文常见 2-7 万字符，真实批次（101 条记录）序列化后达 4.3MB，超过 Temporal gRPC 硬性上限（4MB），`aggregate_activity` 反复超时。修复方式正是当时预判的方向——`write_activity` 不再作为独立 Temporal activity 由 workflow 调度，改为 `aggregate_activity` 内部直接函数调用，records 不再跨 activity 边界序列化。详见 `.claude/memory/decisions.md`「aggregate_activity/write_activity 合并修复 gRPC 4MB 消息上限」。
 - `>8 条建议拆分子类`目前只记录日志不自动执行，`research-papers` 桶真实批次里达到 74 条，明显需要人工评估是否要拆子类——留给后续批次观察积累后再决定。
 
 ## 追加深化：Daily 主题小标题 emoji + Topic 反链对齐（2026-07-05）

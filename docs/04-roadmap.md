@@ -123,6 +123,8 @@ flowchart TB
 
 ### 2.5 Aggregate 阶段（`aggregate_activity`，批量，唯一允许跨文章判断的地方）
 
+> **2026-07-06 起，`aggregate_activity` 内部直接调用 write_activity 完成落库**，不再是 workflow 调度的两个独立 activity——真实批次（101 条记录，含全文正文）实测 `aggregate_activity` 的返回值序列化后达 4.3MB，超过 Temporal gRPC 消息上限（4MB），导致 activity 完成信号发不出去、从 workflow 角度看像是"一直不返回直到超时"。详见 §2.6 说明与 `.claude/memory/decisions.md`。
+
 - [ ] Topic 聚类：预设主题桶（model-releases / safety-alignment / opensource-tools / research-papers / policy-regulation / industry-moves / funding-investment / infra-hardware / applications / agents），按"事件类型"分类，**不按来源/公司分类**
 - [ ] 分桶粒度：桶内 <2 条归并入杂项；>8 条考虑拆分子类；新领域涌现 ≥3 条可创建新 topic
 - [ ] **`is_new` 判定强制规则**：唯一依据是"该 slug 是否存在于当前实际的 topic 记录清单里"——不允许凭经验/推荐桶名称推断；下游 Write 阶段应以实际存储状态为最终依据，聚类误判要记录并纠正，不能将错就错
@@ -136,6 +138,8 @@ flowchart TB
 - [ ] Wikilink 格式：原子笔记用时间戳 ID、主题用 slug、日报用日期、原文归档用 ID（同文件名 stem）；**其余各层引用条目应优先双链到原文归档层**，只有归档失败（ID 为 null）才回退外链
 
 ### 2.6 Write 阶段（`write_activity`，直接 upsert 进 `documents` 表）
+
+> **2026-07-06 起不再单独注册为 Temporal activity**，由 `aggregate_activity` 内部以普通函数调用方式触发（`write_activity` 函数本身保留在 `backend/worker/write.py`，签名/职责不变）。原因是 records（含全文正文）只应在 `aggregate_activity` 内部产生和消费，不应该经过 Temporal 的序列化/传输层跨 activity 边界传递一次——这正是 gRPC 4MB 消息上限被真实批次触发的路径。
 
 - [ ] 五类文档 frontmatter 字段定义（Daily/Zettel/Topic/Digest/Original 各自字段表，含 `related_*` 系列字段模板默认空值、`fallback_notice` 三态语义：null=正常/字符串=降级原因/字段缺失=未启用）
 - [ ] ID/slug 命名：原子笔记用 12 位分钟级时间戳（`YYYYMMDDHHmm-<slug>`）；原文归档与对应笔记**共用同一 HHMM**（便于精确配对反查）；同 HHMM 冲突顺延
@@ -151,7 +155,7 @@ flowchart TB
 
 ### 2.8 编排 / 模型执行 / 运维
 
-- [x] Temporal workflow 定义：`preflight → fetch×N → filter → enrich×M(child workflow) → aggregate → write`
+- [x] Temporal workflow 定义：`preflight → fetch×N → filter → enrich×M(child workflow) → aggregate`（`aggregate_activity` 内部直接调用 `write_activity`，2026-07-06 起两者合并为一个 Temporal activity，详见 §2.6 说明）
 - [x] 定时触发：Temporal 原生 Schedule（`worker.worker.ensure_pipeline_schedule`，worker 启动时幂等 ensure），每日 09:00 Asia/Shanghai，取代原计划的 Celery Beat 薄触发器——M7 落地时确认 Redis 在全代码库唯一用途就是 Celery broker，换成 Schedule 后 `celery-worker`/`celery-beat`/`redis` 三个容器整体退役，`backend/beat/` 模块删除，详见 `.claude/memory/decisions.md`
 - [x] LiteLLM 网关接入，每个固定 LLM 场景定义 pydantic schema 做结构化输出。**经 Instructor 统一走 `Mode.JSON`**（`response_format=json_object` + prompt 注入 schema，完全不涉及 `tool_choice`）——M0 用真实网关对裸 `openai` SDK 实测过强制 tool_choice（`{"type":"function","function":{"name":...}}` / `required`），发现是否支持因模型而异（DeepSeek v4 系列在这台网关的任何调用路径下都不支持，Qwen 系列需要额外传 `extra_body={"enable_thinking": False}` 才支持）；M1 进一步实测发现经 Instructor 调用时连"退而求其次用 `tool_choice=auto`"这条路都不成立——Instructor 的 `Mode.TOOLS` 会忽略显式传入的 `tool_choice`，自己强制指向该 function，`deepseek-v4-flash` 依然报同一个错误。最终修正为 `Mode.JSON`，完全不依赖 function-calling 能力，也不需要再关心某个模型是否支持强制/auto 的 tool_choice，正确性交给 Instructor 的 pydantic 校验 + Temporal 重试兜底。详见 `.claude/memory/decisions.md`「经 Instructor 时统一用 Mode.JSON，不是 tool_choice=auto（M1 修正）」。已验证支持强制模式的模型清单见 `backend/config/models.yaml` 的 `tool_choice_forced` 字段（纯历史参考存档，不是本项目的调用策略依据）。
 - [ ] Instructor 重试次数设到最低（1 或 0），失败直接抛异常交给 Temporal activity 重试策略统一处理，避免嵌套重试
