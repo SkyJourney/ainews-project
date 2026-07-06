@@ -96,8 +96,11 @@ export async function renderMarkdownToHtml(markdown: string, cacheKey?: string):
     if (cached !== undefined) return cached
   }
   const processor = await getProcessor()
-  const { code } = await processor.render(markdown)
-  const html = rewriteMediaUrls(code)
-  if (cacheKey) cacheSet(cacheKey, html)
-  return html
+  // ainews-media:// 必须在喂给 markdown 处理器之前就改写成 /media/ 相对路径——
+  // rehypeSanitize（M6 审查修复新增）的默认协议白名单不认识这个自定义 scheme，
+  // 会把整个 src 属性清空，rewriteMediaUrls 这个字符串替换等 render() 跑完再做
+  // 就已经晚了（已实测复现：站内全部本地图片 src 变空字符串，naturalWidth=0）。
+  const { code } = await processor.render(rewriteMediaUrls(markdown))
+  if (cacheKey) cacheSet(cacheKey, code)
+  return code
 }
