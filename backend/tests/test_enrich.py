@@ -89,3 +89,66 @@ def test_compute_word_count_excludes_local_image_refs():
     long_hash = "abcdef0123456789" * 3
     text = f"正文两个字![配图]({enrich.IMAGE_URL_PREFIX}2026-07-05/{long_hash}.jpg)结尾两个字"
     assert enrich.compute_word_count(text) < 20
+
+
+# ---------------------------------------------------------------------------
+# _arxiv_fulltext_url：arxiv 摘要页 URL 改写成全文 HTML 端点（只有全部 83 篇真实
+# 生产 arxiv 原文只抓到摘要这个问题的根因，见 .claude/memory/known_issues.md）。
+# ---------------------------------------------------------------------------
+
+def test_arxiv_fulltext_url_rewrites_abs_to_html():
+    assert enrich._arxiv_fulltext_url("http://arxiv.org/abs/2607.02140v1") == "https://arxiv.org/html/2607.02140v1"
+    assert enrich._arxiv_fulltext_url("https://arxiv.org/abs/2607.02140v1") == "https://arxiv.org/html/2607.02140v1"
+
+
+def test_arxiv_fulltext_url_none_for_non_arxiv_source():
+    assert enrich._arxiv_fulltext_url("https://openai.com/index/introducing-genebench-pro") is None
+
+
+def test_arxiv_fulltext_url_none_for_already_html_or_pdf_path():
+    assert enrich._arxiv_fulltext_url("https://arxiv.org/html/2607.02140v1") is None
+    assert enrich._arxiv_fulltext_url("https://arxiv.org/pdf/2607.02140v1") is None
+
+
+# ---------------------------------------------------------------------------
+# arxiv 抓取内容自带标题/摘要页头尾噪声清洗——真实批次实测发现全文/摘要页正文
+# 都会自带一份论文标题，跟 documents.title 重复导致"标题渲染两遍"；摘要页额外带
+# 缩进侧边栏噪声，缩进会被 markdown 解释成代码块（见 .claude/memory/known_issues.md）。
+# ---------------------------------------------------------------------------
+
+def test_arxiv_leading_h1_stripped_from_fulltext():
+    raw = "# Some Paper Title\n\n###### Abstract\n\nThe actual abstract text starts here."
+    cleaned = enrich._ARXIV_LEADING_H1_RE.sub("", raw, count=1)
+    assert cleaned == "###### Abstract\n\nThe actual abstract text starts here."
+
+
+def test_clean_arxiv_abs_markdown_strips_header_and_sidebar():
+    raw = (
+        "# Computer Science > Machine Learning\n\n"
+        "  [Submitted on 2 Jul 2026]\n\n"
+        "    # Title:Probing Chemical Language Models\n\n"
+        "View PDFAbstract:This is the real abstract content.\n\n"
+        "      \n      Full-text links:\n      \n          "
+        "![license icon](ainews-media://x/y.png) view license\n\n          view license"
+    )
+    cleaned = enrich._clean_arxiv_abs_markdown(raw)
+    assert cleaned == "This is the real abstract content."
+
+
+# ---------------------------------------------------------------------------
+# _chunk_paragraphs：单个段落超过 max_chars 时必须硬切，否则全文版 arxiv 论文里
+# 没有空行分隔的超长参考文献列表/附录会整段塞进一个分块，翻译输出被 max_tokens
+# 截断触发 IncompleteOutputException（真实批次实测崩溃过，见 known_issues.md）。
+# ---------------------------------------------------------------------------
+
+def test_chunk_paragraphs_splits_oversized_single_paragraph():
+    huge_paragraph = "x" * 5000  # 单段就超过 max_chars=100，且没有任何空行可切
+    chunks = enrich._chunk_paragraphs(huge_paragraph, max_chars=100)
+    assert all(len(c) <= 100 for c in chunks)
+    assert "".join(chunks) == huge_paragraph  # 硬切不能丢字符
+
+
+def test_chunk_paragraphs_normal_case_unaffected():
+    text = "第一段。\n\n第二段。\n\n第三段。"
+    chunks = enrich._chunk_paragraphs(text, max_chars=100)
+    assert chunks == [text]  # 都在上限内，仍然合并成一块，跟硬切逻辑加入前行为一致

@@ -43,8 +43,11 @@ class EnrichArticleWorkflow:
         fetch_result = await workflow.execute_activity(
             fetch_original_activity,
             params.entry.url,
-            # direct(30s，含配图下载) + jina(45s) + playwright(30s) 三级兜底顺序尝试，留够余量
-            start_to_close_timeout=timedelta(seconds=150),
+            # direct(30s，含配图下载) + jina(45s) + playwright(30s) 三级兜底顺序尝试，留够余量；
+            # arxiv 来源现在会优先尝试全文 HTML 端点（图多、页面比摘要页大得多），配图下载
+            # 数量随之明显增加，150s 在真实全文批次下有触底风险，调到 240s（见 decisions.md
+            # "arxiv 只抓到摘要"修复记录）。
+            start_to_close_timeout=timedelta(seconds=240),
             retry_policy=default_retry,
         )
         body_md = fetch_result["body_md"]
@@ -59,7 +62,10 @@ class EnrichArticleWorkflow:
             translation = await workflow.execute_activity(
                 translate_activity,
                 args=[params.entry.title, body_md],
-                start_to_close_timeout=timedelta(seconds=300),
+                # 分块翻译内部已并发（_CHUNK_TRANSLATE_CONCURRENCY），但 arxiv 全文来源常见
+                # 30-50 个分块，300s 在真实全文批次下实测会超时，调到 600s 留够余量（见
+                # decisions.md "arxiv 只抓到摘要"修复记录）。
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=default_retry,
             )
             translated_title = translation["translated_title"]

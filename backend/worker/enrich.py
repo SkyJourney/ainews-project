@@ -22,6 +22,7 @@ import ipaddress
 import os
 import re
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -81,7 +82,14 @@ IMAGE_TIMEOUT_SECONDS = 15.0
 _IMG_TAG_RE = re.compile(r"<img\b([^>]*?)/?>", re.IGNORECASE)
 _IMG_ATTR_RE = re.compile(r'(\w[\w\-]*)\s*=\s*(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
 _VIDEO_SRC_EXTS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".m4v")
-_ICON_SRC_PATTERNS = [re.compile(r"/static/browse/.*?/icons/", re.IGNORECASE)]
+_ICON_SRC_PATTERNS = [
+    re.compile(r"/static/browse/.*?/icons/", re.IGNORECASE),
+    # arxiv.org/html/<id> 全文页用的是另一套静态资源路径（/static/base/.../images/...），
+    # 跟摘要页 /static/browse/.../icons/ 不是同一个——此前只覆盖了摘要页，全文页的
+    # arXiv 官方 logo/吉祥物图标（smileybones）没被拦截，被当正文配图下载+引用
+    # （真实批次实测发现每篇文章多出 1-2 张跟内容无关的 svg 图标）。
+    re.compile(r"arxiv\.org/static/base/.*?/images/", re.IGNORECASE),
+]
 # 已知跟踪/分析像素域名（04 §2.4 配图分级渲染范围外的噪声）：这类 <img> 不是正文配图，
 # M4 实测发现把它们当正文图处理（下载成功后改写成正常 <img> 标签）会让 trafilatura
 # 把页脚噪声一起当"正文"保留，进而拖累翻译完整性校验。按域名而非单站点特判过滤，
@@ -119,13 +127,30 @@ def needs_translation(title: str, body_md: str) -> bool:
 
 
 def _chunk_paragraphs(body_md: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
-    """按段落贪心分块，避免长文本单次撑爆上下文（用户在 M1 明确要求的分段翻译）。"""
+    """按段落贪心分块，避免长文本单次撑爆上下文（用户在 M1 明确要求的分段翻译）。
+
+    单个段落本身超过 max_chars 时硬切成若干子块——此前只在段落之间做贪心分组，
+    假设了"没有单个段落会超过 max_chars"，这在摘要级短文本上一直成立，但全文版
+    arxiv 论文常见没有空行分隔的超长参考文献列表/附录代码块，单段轻松超过 2000 字符。
+    这类超大分块喂给翻译模型会导致输出被 max_tokens（8000）截断，Instructor 直接
+    抛 IncompleteOutputException 中断整个 activity（真实批次实测触发）。硬切虽然可能
+    切在句子中间，但只用于这种"没有更细粒度可分割"的极端输入，比让整个翻译流程崩溃
+    要好得多。
+    """
     paragraphs = body_md.split("\n\n")
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
 
     for para in paragraphs:
+        if len(para) > max_chars:
+            if current:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            chunks.extend(para[i : i + max_chars] for i in range(0, len(para), max_chars))
+            continue
+
         para_len = len(para) + 2
         if current and current_len + para_len > max_chars:
             chunks.append("\n\n".join(current))
@@ -396,12 +421,93 @@ def _clean_fetched_markdown(markdown: str) -> str:
     return _dedup_repeated_paragraphs(markdown)
 
 
+# arxiv.org/abs/<id> 是摘要页，页面本身只有几百字的摘要 + "查看PDF/全文链接/许可"
+# 侧边栏文字，从来不含论文全文——此前 _fetch_direct 直接抓这个 URL，trafilatura 能
+# 抽出内容就判定"通道成功"，导致 100% 的 arxiv 来源文章都只存到了摘要（真实生产数据
+# 验证过：83 篇全部如此，不是偶发）。arXiv 另有全文 HTML 渲染服务（/html/<id>），
+# 但不保证一定存在——论文提交后渲染有延迟（实测提交 3 天后 88% 可用），复杂 LaTeX/
+# 图表也可能永久渲染失败——因此只作为优先尝试，不存在时静默回退到下面本来就有的
+# 摘要页抓取，不影响非 arxiv 来源、也不改变现有的 direct→jina→playwright 兜底链路。
+_ARXIV_ABS_RE = re.compile(r"^https?://arxiv\.org/abs/([\w.]+)/?$", re.IGNORECASE)
+
+
+def _arxiv_fulltext_url(url: str) -> str | None:
+    m = _ARXIV_ABS_RE.match(url.strip())
+    return f"https://arxiv.org/html/{m.group(1)}" if m else None
+
+
+# arxiv 全文页/摘要页抽出来的 markdown 正文开头都自带一份论文标题——跟 documents.title
+# 字段（独立存储、前端详情页单独渲染一次）重复，会造成"标题渲染两遍"（M6 曾经修过
+# aggregate.py 自己拼接标题导致的同款问题，这次是抓取源内容本身自带的，见
+# .claude/memory/known_issues.md）。全文页只需要去掉第一行 H1（个别论文标题换行会有
+# 一小段孤立残留，比整篇重复渲染的视觉问题小得多，不做更激进的处理）。
+_ARXIV_LEADING_H1_RE = re.compile(r"^#[ \t]+.+?\n+")
+
+# 摘要页固定的头部结构：分类标题行 + 提交日期 + "Title:实际标题"行，三者都是重复/
+# 元数据，不是正文；"Title:"这一行经常带 4 个以上前导空格，如果只清标题不清这段
+# 缩进，后面"View PDFAbstract:"前缀和侧边栏都会保留原样缩进，被 markdown 解释成
+# 代码块导致图片/标题语法原样显示成文字（真实截图复现过的问题）。
+_ARXIV_ABS_HEADER_RE = re.compile(
+    r"^#[^\n]*\n+\s*\[Submitted[^\]]*\]\n+\s*#+\s*Title:[^\n]*\n+", re.IGNORECASE
+)
+_ARXIV_ABS_VIEWPDF_PREFIX_RE = re.compile(r"^\s*View PDF\s*Abstract:\s*", re.IGNORECASE)
+# 摘要页尾部固定的"全文链接/访问论文"侧边栏（许可图标 + "view license"说明文字），
+# 不是正文内容，且同样有缩进导致的渲染问题，按已知标记整体截断（跟
+# _strip_known_boilerplate 是同一种"按已知标记裁剪"手法，只是这段没有 Markdown
+# 标题前缀，不能复用同一个正则）。
+_ARXIV_ABS_SIDEBAR_RE = re.compile(r"\n+\s*Full-text links:.*", re.DOTALL | re.IGNORECASE)
+
+
+def _clean_arxiv_abs_markdown(markdown: str) -> str:
+    markdown = _ARXIV_ABS_HEADER_RE.sub("", markdown, count=1)
+    markdown = _ARXIV_ABS_VIEWPDF_PREFIX_RE.sub("", markdown, count=1)
+    markdown = _ARXIV_ABS_SIDEBAR_RE.sub("", markdown, count=1)
+    return markdown.strip()
+
+
+def _try_arxiv_fulltext(url: str) -> str | None:
+    """尝试 arxiv 全文 HTML 端点；任何失败（404/超时/SSRF 拦截/trafilatura 抽取为空）
+    都只返回 None，不抛异常——这只是 direct 通道内部的一次可选增强尝试，失败时调用方
+    应该原样回退到摘要页，不应该因此跳过摘要页直接进入 Jina/Playwright 兜底链路。
+    """
+    fulltext_url = _arxiv_fulltext_url(url)
+    if not fulltext_url:
+        return None
+    try:
+        response = _safe_get(fulltext_url, headers={"User-Agent": USER_AGENT}, timeout=30.0)
+    except (httpx.HTTPError, SSRFBlockedError):
+        return None
+    if response.status_code != 200:
+        return None
+
+    article_key = hashlib.sha256(fulltext_url.encode("utf-8")).hexdigest()[:12]
+    html_with_images_processed = _process_images(response.text, base_url=fulltext_url, article_key=article_key)
+    markdown = trafilatura.extract(
+        html_with_images_processed,
+        url=fulltext_url,
+        output_format="markdown",
+        with_metadata=False,
+        include_images=True,
+    )
+    if markdown:
+        markdown = _ARXIV_LEADING_H1_RE.sub("", markdown, count=1)
+    return _clean_fetched_markdown(markdown) if markdown else None
+
+
 def _fetch_direct(url: str) -> str | None:
     """状态①：direct 通道，唯一会处理配图的通道。命中 Jina 触发条件（含重定向跳到
     不安全地址，按 SSRF 拦截处理）时返回 None 交给调用方走兜底；其余 HTTP 错误（如真实
     的 404）原样抛出——由调用方 fetch_original_activity 统一捕获并降级到下一通道，
     这里不吞掉，方便日志里看到具体是哪种错误。
+
+    arxiv 来源会先尝试全文 HTML 端点（见 `_try_arxiv_fulltext`），命中就直接返回；
+    未命中（非 arxiv 来源，或 arxiv 全文暂不可用）走下面原有的摘要页/原页面抓取逻辑，
+    行为与此前完全一致。
     """
+    fulltext = _try_arxiv_fulltext(url)
+    if fulltext:
+        return fulltext
+
     try:
         response = _safe_get(url, headers={"User-Agent": USER_AGENT}, timeout=30.0)
     except (httpx.TimeoutException, SSRFBlockedError):
@@ -419,7 +525,10 @@ def _fetch_direct(url: str) -> str | None:
     )
     if not markdown:
         return markdown
-    return _clean_fetched_markdown(markdown)
+    markdown = _clean_fetched_markdown(markdown)
+    if _ARXIV_ABS_RE.match(url.strip()):
+        markdown = _clean_arxiv_abs_markdown(markdown)
+    return markdown
 
 
 def _fetch_via_jina(url: str) -> str | None:
@@ -614,6 +723,12 @@ def _translate_chunk(chunk: str, *, retry: bool = False) -> str:
 
 _CHUNK_MAX_RETRIES = 2
 
+# 分块翻译并发上限：分块彼此独立、各自一次网络请求，线程池并发是安全的加速手段；
+# 数值选择在"明显缩短长文章翻译耗时"与"不对自建 LiteLLM 网关瞬时并发造成冲击"之间
+# 取一个保守值——Temporal 本身已经按文章级别做 fan-out（多篇文章同时在跑），单篇内部
+# 再叠加过高并发会放大整体瞬时请求量。
+_CHUNK_TRANSLATE_CONCURRENCY = 6
+
 
 def _translate_chunk_with_retry(chunk: str) -> tuple[str, bool, int]:
     """返回 (译文, 是否判定为噪声跳过翻译, 实际重试次数)。
@@ -670,10 +785,23 @@ def translate_activity(title: str, body_md: str) -> dict:
     )
 
     chunks = _chunk_paragraphs(body_md)
-    translated_chunks: list[str] = []
-    for i, chunk in enumerate(chunks):
-        translated, skipped_as_noise, retry_count = _translate_chunk_with_retry(chunk)
-        translated_chunks.append(translated)
+    translated_chunks: list[str | None] = [None] * len(chunks)
+    failed_chunk_indices: list[int] = []
+
+    def _translate_one(i: int, chunk: str) -> None:
+        try:
+            translated, skipped_as_noise, retry_count = _translate_chunk_with_retry(chunk)
+        except Exception as exc:  # noqa: BLE001 - 单个分块的翻译调用异常（如遇到超长分块
+            # 触发 IncompleteOutputException）不该打断整篇文章的翻译；保留原文分块，
+            # 明确记为降级，而不是让整个 activity 崩溃、这篇文章从批次里彻底消失。
+            activity.logger.warning(
+                f"[chunk_diag] title={title[:40]!r} chunk={i}/{len(chunks)} 翻译调用异常，保留原文：{exc!r}"
+            )
+            translated_chunks[i] = chunk
+            failed_chunk_indices.append(i)
+            return
+
+        translated_chunks[i] = translated
 
         # 诊断专用：逐块记录 CJK 占比/残留命中情况，用于精确定位整体校验失败的根因，
         # 附带记录本块是否被跳过翻译/实际重试了几次，方便评估修复效果。
@@ -687,9 +815,25 @@ def translate_activity(title: str, body_md: str) -> dict:
                 f"preview={translated[:80]!r}"
             )
 
+    # 分块之间彼此独立（互不依赖上下文），并发翻译——此前逐块顺序调用，全文版 arxiv
+    # 论文常见 30-50 个分块，单篇光翻译就要十几分钟，超出 workflows.py 给这个 activity
+    # 配置的 start_to_close_timeout（真实批次实测踩到过）。每个分块各自独立起一次
+    # call_structured 网络请求，线程池并发对 I/O 密集型调用是安全且有效的加速手段；
+    # `_CHUNK_TRANSLATE_CONCURRENCY` 控制并发上限，避免瞬间打满网关。
+    with ThreadPoolExecutor(max_workers=min(_CHUNK_TRANSLATE_CONCURRENCY, len(chunks) or 1)) as pool:
+        futures = [pool.submit(_translate_one, i, chunk) for i, chunk in enumerate(chunks)]
+        for future in futures:
+            future.result()  # _translate_one 内部已捕获单块翻译异常，这里正常不会再抛出
+
     translated_body = "\n\n".join(translated_chunks)
 
+    # 单块翻译异常已经在 _translate_one 里降级为"保留原文"，但不能因此悄悄放过——
+    # 04 §2.4 硬约束是"不能悄悄标记为翻译完成"，即使失败的分块只占少数、拼接后的
+    # 整体 CJK 占比仍然达标（不会触发下面的完整性校验降级），也必须显式记一条通知。
     fallback_notice = None
+    if failed_chunk_indices:
+        fallback_notice = f"{len(failed_chunk_indices)}/{len(chunks)} 个分块因翻译调用异常保留原文未翻译"
+
     if not _validate_translation_completeness(translated_body):
         has_residue = _has_untranslated_residue(translated_body)
         reviewed_as_complete = False
@@ -712,7 +856,8 @@ def translate_activity(title: str, body_md: str) -> dict:
                         translated_chunks[-1],
                     ]
                 )
-            fallback_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
+            completeness_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
+            fallback_notice = f"{fallback_notice}；{completeness_notice}" if fallback_notice else completeness_notice
             activity.logger.warning(f"translate_activity 完整性校验未通过：{title[:50]}")
 
     return {
