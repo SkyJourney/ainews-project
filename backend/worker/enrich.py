@@ -724,10 +724,16 @@ def _translate_chunk(chunk: str, *, retry: bool = False) -> str:
 _CHUNK_MAX_RETRIES = 2
 
 # 分块翻译并发上限：分块彼此独立、各自一次网络请求，线程池并发是安全的加速手段；
-# 数值选择在"明显缩短长文章翻译耗时"与"不对自建 LiteLLM 网关瞬时并发造成冲击"之间
-# 取一个保守值——Temporal 本身已经按文章级别做 fan-out（多篇文章同时在跑），单篇内部
-# 再叠加过高并发会放大整体瞬时请求量。
-_CHUNK_TRANSLATE_CONCURRENCY = 6
+# 但 Temporal 本身已经按文章级别做 fan-out（activity_executor 最多 20 个并发 activity，
+# worker.py::MAX_ACTIVITY_WORKERS），单篇内部再叠加并发是"乘法"而不是"加法"——
+# 6 意味着最多 20×6=120 路并发同时打向同一个共享 LiteLLM 客户端。2026-07-06 排查
+# aggregate_activity 反复超时问题时一度怀疑是这里的高并发拖垮了共享连接池，但用
+# py-spy 栈追踪+完整日志核查确认真正根因是另一件事（gRPC 4MB 消息上限，见
+# .claude/memory/decisions.md「M7 观察期：aggregate_activity/write_activity 合并
+# 修复 gRPC 4MB 消息上限」），跟这里的并发数无关。降到 2（乘法上限压到 20×2=40）
+# 仍然保留——单纯是"不过度放大对自建网关的瞬时并发冲击"这个独立考量，不是在修复
+# aggregate_activity 超时。
+_CHUNK_TRANSLATE_CONCURRENCY = 2
 
 
 def _translate_chunk_with_retry(chunk: str) -> tuple[str, bool, int]:
