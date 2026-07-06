@@ -26,8 +26,7 @@ flowchart TB
     end
 
     subgraph MODEL["模型执行层"]
-        LITELLM["自建 LiteLLM<br/>(OpenAI 兼容网关)"]
-        MODELS["各厂商模型端点"]
+        LLM["OpenAI 兼容端点<br/>(网关或供应商，任意可替换)"]
     end
 
     subgraph STORE["Postgres（唯一权威存储，Temporal 状态与内容各自独立 database）"]
@@ -45,8 +44,7 @@ flowchart TB
     SCHEDULE --> TS
     TS <--> PGSTATE
     TS --> WORKER
-    WORKER --> LITELLM
-    LITELLM --> MODELS
+    WORKER --> LLM
     WORKER -->|写完即发布| PGCONTENT
 ```
 
@@ -56,7 +54,7 @@ flowchart TB
 
 - **编排**：[Temporal](https://temporal.io/)（Python SDK）—— 持久化 workflow，接管动态 fan-out、重试、定时调度（Temporal 原生 Schedule）
 - **存储**：PostgreSQL + JSONB，与 Temporal 共用同一实例、各自独立 database
-- **模型调用**：`openai` SDK 换 `base_url` 直连自建 LiteLLM 网关，经 [Instructor](https://python.useinstructor.com/)（`Mode.JSON`）做结构化输出校验
+- **模型调用**：`openai` SDK 换 `base_url` 即可接入任意 OpenAI 兼容的模型供应商（自建网关或云端直连均可），经 [Instructor](https://python.useinstructor.com/)（`Mode.JSON`）做结构化输出校验；可用模型列表见 [`backend/config/models.yaml`](./backend/config/models.yaml)
 - **前端**：[Astro 7](https://astro.build/)（`output: 'server'` + `@astrojs/node` adapter）+ 自建 Live Content Collections Loader 直连 Postgres，Tailwind CSS
 - **测试**：pytest（后端，含用 Temporal 官方 time-skipping `WorkflowEnvironment` 驱动的真实 workflow 测试）
 
@@ -70,7 +68,8 @@ cd ainews-project
 
 cp .env.example infra/.env
 # 编辑 infra/.env：至少填 POSTGRES_PASSWORD、LITELLM_BASE_URL、LITELLM_API_KEY
-# LITELLM_BASE_URL 必须自带 OpenAI 兼容协议路径（形如 https://your-gateway/openai/v1）
+# LITELLM_BASE_URL 指向任意 OpenAI 兼容协议端点即可（自建网关或供应商直连均可，
+# 形如 https://your-endpoint/v1）；可用模型列表见 backend/config/models.yaml
 
 cd infra
 docker compose up -d
