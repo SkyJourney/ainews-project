@@ -101,16 +101,17 @@ SPLIT_SUGGESTION_THRESHOLD = 8
 ZETTEL_YIELD_SOFT_MIN = 3
 ZETTEL_YIELD_SOFT_MAX = 10
 
-# 2026-07-06：从 deepseek-v4-flash 换成 qwen3.6-flash。真实批次排查 aggregate_activity
-# 反复超时（180s→360s→900s 均不够）时，用 py-spy 对卡住的线程做实时栈追踪，确认线程
-# 一直阻塞在等待这几个聚类/打标调用的 HTTP 响应上（不是代码 bug、不是连接池/线程池/
-# workflow 历史膨胀——这几类假设均已用对照实验排除），且同一时刻对网关发起的其他简单
-# 请求秒级返回，说明不是网关整体故障，是 deepseek-v4-flash 处理这类批量结构化调用偶发
-# 异常慢。实测 qwen3.6-flash 用同样的 ClusterAssignment schema 能正常返回结构化结果，
-# 换用它规避这个问题（见 .claude/memory/decisions.md）。
-_CLUSTER_MODEL = "qwen3.6-flash"
-_TAG_MODEL = "qwen3.6-flash"
-_DAILY_HIGHLIGHT_MODEL = "qwen3.6-flash"
+# 2026-07-06：排查 aggregate_activity 反复超时（180s→360s→900s 均不够）时，py-spy
+# 栈追踪一度看到线程阻塞在这几个聚类/打标调用的 HTTP 响应上，怀疑是 deepseek-v4-flash
+# 处理这类批量结构化调用偶发异常慢，临时换成 qwen3.6-flash 规避。后续完整排查确认
+# 真正根因跟模型无关，是 aggregate_activity 返回值序列化后超过 Temporal gRPC 4MB
+# 消息上限（见 .claude/memory/decisions.md「M7 观察期：aggregate_activity/write_activity
+# 合并修复 gRPC 4MB 消息上限」）。activity 合并 + 600s 超时的修复已用真实批次验证
+# 通过，跟模型选择无关，换回项目默认的 deepseek-v4-flash（Mode.JSON + max_retries=1
+# 已处理它"答案写进 reasoning_content"的已知问题，其余场景全程也是这个模型）。
+_CLUSTER_MODEL = "deepseek-v4-flash"
+_TAG_MODEL = "deepseek-v4-flash"
+_DAILY_HIGHLIGHT_MODEL = "deepseek-v4-flash"
 # 聚类/打标调用的输出条目数随批次规模线性增长，真实批次实测 136 篇一次性调用触发
 # instructor.IncompleteOutputException（超过 max_tokens 被截断）——单纯调高 max_tokens
 # 只是把问题推迟到更大的批次，改成分块调用（沿用 enrich.py 翻译阶段"按段落分块"的既有
