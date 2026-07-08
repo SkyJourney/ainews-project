@@ -26,7 +26,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from worker.schemas import Entry, EnrichArticleParams, PipelineParams
-from worker.workflows import AInewsPipelineWorkflow, EnrichArticleWorkflow
+from worker.workflows import AInewsPipelineWorkflow, ArxivFulltextBackfillWorkflow, EnrichArticleWorkflow
 
 TASK_QUEUE = "test-task-queue"
 
@@ -58,7 +58,7 @@ async def test_enrich_article_workflow_skips_translation_when_not_needed(env):
     @activity.defn(name="fetch_original_activity")
     async def fake_fetch(url: str) -> dict:
         recorder.calls.append(f"fetch:{url}")
-        return {"body_md": "这是一段不需要翻译的中文正文。", "fetch_channel": "direct"}
+        return {"body_md": "这是一段不需要翻译的中文正文。", "fetch_channel": "direct", "arxiv_fulltext_pending": None}
 
     @activity.defn(name="translate_activity")
     async def fake_translate(title: str, body: str) -> dict:
@@ -130,7 +130,7 @@ def _pipeline_activities(recorder: _Recorder, *, failing_source: str | None = No
         recorder.calls.append(f"fetch_original:{url}")
         if url == failing_url:
             raise RuntimeError(f"{url} 原文抓取持续失败（模拟）")
-        return {"body_md": "这是一段中文正文，不需要翻译。", "fetch_channel": "direct"}
+        return {"body_md": "这是一段中文正文，不需要翻译。", "fetch_channel": "direct", "arxiv_fulltext_pending": None}
 
     @activity.defn(name="translate_activity")
     async def translate(title: str, body: str) -> dict:
@@ -239,3 +239,207 @@ async def test_single_article_enrich_failure_does_not_block_others(env):
     # aggregate（内部含 write）依然要跑完整个批次，不因为一篇文章失败而中断整条流水线
     assert "aggregate_activity" in recorder.calls
     assert result["written"] == 0  # mock aggregate 固定返回 written=0
+
+
+# ---------------------------------------------------------------------------
+# ArxivFulltextBackfillWorkflow：只对"现在真的有全文了"的候选走完整 enrich + 写回，
+# 仍然只有摘要的候选直接跳过（不浪费翻译/摘要/元数据这几个 LLM 调用），2026-07-08 新增。
+# ---------------------------------------------------------------------------
+
+async def test_arxiv_backfill_only_processes_candidates_with_fulltext_available(env):
+    recorder = _Recorder()
+
+    @activity.defn(name="list_arxiv_fulltext_backfill_candidates_activity")
+    async def list_candidates() -> list[dict]:
+        return [
+            {
+                "doc_id": "original-ready",
+                "url": "http://arxiv.org/abs/1111.11111",
+                "topic_slug": "research-papers",
+                "related_zettel_id": None,
+                "fetched_title": "Ready Paper",
+                "published_at": date(2026, 7, 1),
+                "tags": ["arxiv"],
+            },
+            {
+                "doc_id": "original-not-ready",
+                "url": "http://arxiv.org/abs/2222.22222",
+                "topic_slug": "research-papers",
+                "related_zettel_id": None,
+                "fetched_title": "Not Ready Paper",
+                "published_at": date(2026, 7, 1),
+                "tags": ["arxiv"],
+            },
+        ]
+
+    @activity.defn(name="check_arxiv_fulltext_activity")
+    async def check_fulltext(url: str) -> bool:
+        recorder.calls.append(f"check:{url}")
+        return url == "http://arxiv.org/abs/1111.11111"
+
+    @activity.defn(name="fetch_original_activity")
+    async def fake_fetch(url: str) -> dict:
+        recorder.calls.append(f"fetch:{url}")
+        return {"body_md": "这是一段中文正文，不需要翻译。", "fetch_channel": "direct", "arxiv_fulltext_pending": False}
+
+    @activity.defn(name="translate_activity")
+    async def fake_translate(title: str, body: str) -> dict:
+        return {"translated_title": None, "translated_body_md": None, "translation_fallback_notice": None}
+
+    @activity.defn(name="gist_activity")
+    async def fake_gist(title: str, body: str) -> str:
+        return "一句话摘要"
+
+    @activity.defn(name="metadata_activity")
+    async def fake_metadata(title: str, body: str) -> dict:
+        return {"entities": [], "content_type": "research_paper", "novelty_keywords": []}
+
+    @activity.defn(name="upsert_article_activity")
+    async def fake_upsert(payload: dict) -> None:
+        recorder.calls.append("upsert")
+
+    @activity.defn(name="refresh_original_document_activity")
+    async def fake_refresh(payload: dict) -> None:
+        recorder.calls.append(f"refresh:{payload['doc_id']}")
+
+    async with Worker(
+        env.client,
+        task_queue=TASK_QUEUE,
+        workflows=[ArxivFulltextBackfillWorkflow, EnrichArticleWorkflow],
+        activities=[
+            list_candidates,
+            check_fulltext,
+            fake_fetch,
+            fake_translate,
+            fake_gist,
+            fake_metadata,
+            fake_upsert,
+            fake_refresh,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            ArxivFulltextBackfillWorkflow.run,
+            id="arxiv-backfill-test",
+            task_queue=TASK_QUEUE,
+            execution_timeout=timedelta(seconds=30),
+        )
+
+    assert result == {"checked": 2, "ready": 1, "upgraded": 1}
+    # 两篇都做过便宜的可用性检查
+    assert "check:http://arxiv.org/abs/1111.11111" in recorder.calls
+    assert "check:http://arxiv.org/abs/2222.22222" in recorder.calls
+    # 只有真的有全文的那篇走完了 enrich + 写回
+    assert "fetch:http://arxiv.org/abs/1111.11111" in recorder.calls
+    assert "refresh:original-ready" in recorder.calls
+    # 仍然只有摘要的那篇完全没有触发 enrich（不浪费 LLM 调用）
+    assert "fetch:http://arxiv.org/abs/2222.22222" not in recorder.calls
+    assert "refresh:original-not-ready" not in recorder.calls
+
+
+async def test_arxiv_backfill_survives_check_activity_exception(env):
+    """2026-07-08 修复：可用性检查本身报错（耗尽重试后）不应该让整个 workflow 崩溃，
+    也不应该被无声当成"未就绪"——该候选被排除在 ready 之外，其余候选正常处理。"""
+    recorder = _Recorder()
+
+    @activity.defn(name="list_arxiv_fulltext_backfill_candidates_activity")
+    async def list_candidates() -> list[dict]:
+        return [
+            {
+                "doc_id": "original-ready",
+                "url": "http://arxiv.org/abs/1111.11111",
+                "topic_slug": "research-papers",
+                "related_zettel_id": None,
+                "fetched_title": "Ready Paper",
+                "published_at": date(2026, 7, 1),
+                "tags": ["arxiv"],
+            },
+            {
+                "doc_id": "original-check-fails",
+                "url": "http://arxiv.org/abs/3333.33333",
+                "topic_slug": "research-papers",
+                "related_zettel_id": None,
+                "fetched_title": "Flaky Check Paper",
+                "published_at": date(2026, 7, 1),
+                "tags": ["arxiv"],
+            },
+        ]
+
+    @activity.defn(name="check_arxiv_fulltext_activity")
+    async def check_fulltext(url: str) -> bool:
+        if url == "http://arxiv.org/abs/3333.33333":
+            raise RuntimeError("arxiv 探测请求超时")
+        return True
+
+    @activity.defn(name="fetch_original_activity")
+    async def fake_fetch(url: str) -> dict:
+        recorder.calls.append(f"fetch:{url}")
+        return {"body_md": "这是一段中文正文，不需要翻译。", "fetch_channel": "direct", "arxiv_fulltext_pending": False}
+
+    @activity.defn(name="translate_activity")
+    async def fake_translate(title: str, body: str) -> dict:
+        return {"translated_title": None, "translated_body_md": None, "translation_fallback_notice": None}
+
+    @activity.defn(name="gist_activity")
+    async def fake_gist(title: str, body: str) -> str:
+        return "一句话摘要"
+
+    @activity.defn(name="metadata_activity")
+    async def fake_metadata(title: str, body: str) -> dict:
+        return {"entities": [], "content_type": "research_paper", "novelty_keywords": []}
+
+    @activity.defn(name="upsert_article_activity")
+    async def fake_upsert(payload: dict) -> None:
+        recorder.calls.append("upsert")
+
+    @activity.defn(name="refresh_original_document_activity")
+    async def fake_refresh(payload: dict) -> None:
+        recorder.calls.append(f"refresh:{payload['doc_id']}")
+
+    async with Worker(
+        env.client,
+        task_queue=TASK_QUEUE,
+        workflows=[ArxivFulltextBackfillWorkflow, EnrichArticleWorkflow],
+        activities=[
+            list_candidates,
+            check_fulltext,
+            fake_fetch,
+            fake_translate,
+            fake_gist,
+            fake_metadata,
+            fake_upsert,
+            fake_refresh,
+        ],
+    ):
+        result = await env.client.execute_workflow(
+            ArxivFulltextBackfillWorkflow.run,
+            id="arxiv-backfill-check-exception-test",
+            task_queue=TASK_QUEUE,
+            execution_timeout=timedelta(seconds=30),
+        )
+
+    # 探测报错的那篇被排除在 ready 之外，但不影响另一篇正常走完 enrich + 写回；
+    # workflow 本身不崩溃、正常返回。
+    assert result == {"checked": 2, "ready": 1, "upgraded": 1}
+    assert "refresh:original-ready" in recorder.calls
+    assert "refresh:original-check-fails" not in recorder.calls
+
+
+async def test_arxiv_backfill_returns_zero_when_no_candidates(env):
+    @activity.defn(name="list_arxiv_fulltext_backfill_candidates_activity")
+    async def list_candidates() -> list[dict]:
+        return []
+
+    async with Worker(
+        env.client,
+        task_queue=TASK_QUEUE,
+        workflows=[ArxivFulltextBackfillWorkflow],
+        activities=[list_candidates],
+    ):
+        result = await env.client.execute_workflow(
+            ArxivFulltextBackfillWorkflow.run,
+            id="arxiv-backfill-empty-test",
+            task_queue=TASK_QUEUE,
+            execution_timeout=timedelta(seconds=30),
+        )
+
+    assert result == {"checked": 0, "ready": 0, "upgraded": 0}

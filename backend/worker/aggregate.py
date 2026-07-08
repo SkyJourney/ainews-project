@@ -320,7 +320,7 @@ def _decide_zettel(index_entry: dict | None, slug: str, used_ids: set[str]) -> d
 # Original / Zettel 记录组装
 # ---------------------------------------------------------------------------
 
-def _build_original_record(article: dict, original_id: str, zettel_id: str | None, decision: dict, tags: list[str]) -> dict:
+def build_original_record(article: dict, original_id: str, zettel_id: str | None, decision: dict, tags: list[str]) -> dict:
     title = _display_title(article)
     # 不在 body_md 里重复拼 "# {title}"：title 已经是独立字段（documents.title 列 +
     # frontmatter.title），前端详情页会单独渲染一次；重复拼会导致页面标题渲染两遍，
@@ -338,6 +338,10 @@ def _build_original_record(article: dict, original_id: str, zettel_id: str | Non
         "word_count": article.get("word_count"),
         "fallback_notice": _build_fallback_notice(article["fetch_channel"], article.get("translation_fallback_notice")),
         "related_zettel_id": zettel_id,
+        # 仅 arxiv 来源才有意义（True=当前只抓到摘要页，全文还没渲染出来；False=已有
+        # 全文；None=非 arxiv 来源）——供每日 arxiv 全文回补 workflow 查询候选，见
+        # worker/arxiv_backfill.py。
+        "arxiv_fulltext_pending": article.get("arxiv_fulltext_pending"),
     }
     return {
         "doc_id": original_id,
@@ -354,7 +358,7 @@ def _build_original_record(article: dict, original_id: str, zettel_id: str | Non
 
 def _build_zettel_record(article: dict, zettel_id: str, original_id: str, decision: dict, tags: list[str]) -> dict:
     title = _display_title(article)
-    # 同 _build_original_record：title 已是独立字段，不在 body_md 里重复拼标题
+    # 同 build_original_record：title 已是独立字段，不在 body_md 里重复拼标题
     body_md = f"{article['gist']}\n\n原文归档：[[{original_id}]]"
     frontmatter = {
         "title": title,
@@ -415,10 +419,10 @@ def _insert_topic_block(body_md: str, doc_date: date, entry_lines: list[str]) ->
 
 
 def _build_topic_record(slug: str, entries: list[tuple[dict, str | None, str]], doc_date: date) -> dict:
-    entry_lines = [_render_topic_entry_line(a, zid, oid) for a, zid, oid in entries]
     existing = aggregate_get_document(slug)
 
     if existing is None:
+        entry_lines = [_render_topic_entry_line(a, zid, oid) for a, zid, oid in entries]
         title = _humanize_slug(slug)
         # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
         body_md = f"{_topic_date_heading(doc_date)}\n\n" + "\n".join(entry_lines) + "\n"
@@ -428,14 +432,24 @@ def _build_topic_record(slug: str, entries: list[tuple[dict, str | None, str]], 
             "topic_slug": slug,
             "created_date": doc_date.isoformat(),
             "last_updated_date": doc_date.isoformat(),
-            "article_count": len(entries),
         }
     else:
-        body_md = _insert_topic_block(existing["body_md"], doc_date, entry_lines)
+        # 2026-07-07：aggregate_activity 对同一个 batch_id 重跑（人工补录失败文章，或
+        # Temporal 对整个 activity 的自动重试）时，entries 里可能包含这个 topic 之前
+        # 已经写过的文章——追加前按 [[link_id]] 是否已出现在正文里去重，避免同一条目
+        # 被重复追加（见 .claude/memory/known_issues.md 2026-07-07 记录）。
+        new_entries = [
+            (a, zid, oid) for a, zid, oid in entries if f"[[{zid or oid}]]" not in existing["body_md"]
+        ]
+        entry_lines = [_render_topic_entry_line(a, zid, oid) for a, zid, oid in new_entries]
+        body_md = _insert_topic_block(existing["body_md"], doc_date, entry_lines) if entry_lines else existing["body_md"]
         frontmatter = dict(existing["frontmatter"])
         frontmatter["last_updated_date"] = doc_date.isoformat()
-        frontmatter["article_count"] = frontmatter.get("article_count", 0) + len(entries)
         title = frontmatter.get("title", _humanize_slug(slug))
+
+    # article_count 机械统计正文里实际的条目行数，不再靠 += 累加——重跑同一个 batch_id
+    # 时才不会重复计数（理由同上）；呼应项目一贯"不自估、机械计算"的原则。
+    frontmatter["article_count"] = body_md.count("\n- [[")
 
     return {
         "doc_id": slug,
@@ -751,7 +765,7 @@ def aggregate_activity(batch_id: str) -> dict:
             "is_recap": is_recap,
         }
 
-        records.append(_build_original_record(article, original_id, zettel_id, decision, tags))
+        records.append(build_original_record(article, original_id, zettel_id, decision, tags))
         if is_new_zettel:
             records.append(_build_zettel_record(article, zettel_id, original_id, decision, tags))
 

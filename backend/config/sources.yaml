@@ -1,5 +1,8 @@
 # 信息源注册表（配置数据，非代码）。字段定义见 docs/04-roadmap.md §2.1。
 # M3 全部 14 条已录入并逐条用真实 HTTP 请求核实过有效（2026-07-04）。
+# 2026-07-07：jiqizhixin 数据质量问题反复出现后停用（reliability: dead），新增
+# marktechpost/venturebeat-ai/techcrunch-ai 三条替补源（14→13→16）；随后 state-of-ai
+# 核实历史产出全是静态年度报告版本页、无持续新内容，一并停用，活跃源数 16→15。
 #
 # 字段说明：
 #   name          kebab-case 唯一标识
@@ -80,6 +83,30 @@ sources:
     last_verified: "2026-07-04"
     url: "https://press.airstreet.com/feed"
 
+  - name: marktechpost
+    tier: 2
+    perspective: research
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-07"
+    url: "https://www.marktechpost.com/feed"
+
+  - name: venturebeat-ai
+    tier: 2
+    perspective: product
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-07"
+    url: "https://venturebeat.com/category/ai/feed/"
+
+  - name: techcrunch-ai
+    tier: 2
+    perspective: product
+    fetch_method: rss
+    reliability: alive
+    last_verified: "2026-07-07"
+    url: "https://techcrunch.com/category/artificial-intelligence/feed/"
+
   # ── T3：降级兜底源 ──
   - name: anthropic-news
     tier: 3
@@ -109,9 +136,14 @@ sources:
     tier: 3
     perspective: product
     fetch_method: script
-    reliability: alive
+    reliability: dead
     last_verified: "2026-07-04"
     url: "https://plink.anyfeeder.com/weixin/almosthuman2014"
+    # 2026-07-07 起标记 dead，不再参与 fetch fan-out：anyfeeder 微信镜像提取出的
+    # mp 直链经常在跨日抓取时命中微信自己的反爬验证页（历史 9 篇里 4 篇受影响，
+    # 且修好 URL 转义 bug 后重试仍然拿不到真实正文，确认是微信对这些内容的持续性
+    # 访问限制，不是抓取实现问题），数据质量不稳定，决定停用整个源，不再逐条排查。
+    # 详见 .claude/memory/decisions.md「2026-07-07 观察期真实故障」。
 
   - name: a16z-news-content
     tier: 3
@@ -126,6 +158,11 @@ sources:
     tier: 3
     perspective: investor
     fetch_method: webfetch
-    reliability: alive
+    reliability: dead
     last_verified: "2026-07-04"
     url: "https://www.stateof.ai/"
+    # 2026-07-07 起标记 dead：核查历史产出发现全部 10 篇 Original 的 doc_date 都停在
+    # 2026-07-05（M8 迁移那天），标题只是历年 State of AI Report 静态版本页（2018-2025
+    # 各版 Edition + 目录页"计算索引"），不是持续产出的新闻内容——这个网站本质是年度
+    # 报告的静态落地页，webfetch 抓首页拿到的是历年版本链接列表，不是每日新增文章，
+    # 上线以来没有真正贡献过新内容，用户判断"没啥意义"决定停用。

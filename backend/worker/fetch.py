@@ -209,23 +209,47 @@ def _parse_arxiv_atom(xml_text: str, *, source_name: str) -> list[Entry]:
 
 
 # ---------------------------------------------------------------------------
-# api：huggingface-daily-papers（日期回退：今天无数据试昨天）
+# api：huggingface-daily-papers（日期回退：优先查昨天，今天兜底再试一次）
 # ---------------------------------------------------------------------------
 
 def _fetch_huggingface_daily_papers(url: str, *, source_name: str) -> list[Entry]:
+    """2026-07-08：执行环境是 CST（UTC+8），HuggingFace daily_papers 的数据更新节奏
+    贴近美东时间（EDT，UTC-4）——每日 09:00 CST 触发时相当于美东前一天 21 点左右，
+    当天（CST 日期）对应的美东日期还没真正开始，直接查 today 大概率命中还没有数据
+    的日期，返回 400 Bad Request（不是空列表）。原来的日期回退循环只处理"200 但
+    payload 为空"这一种情况，`response.raise_for_status()` 在第一次 400 时就直接
+    抛出异常，回退到昨天这一步根本执行不到——改成优先查 today-1（对应大概率数据
+    已经完整的美东当日），today 只作为兜底再试一次；两次都失败（无论是 400 还是
+    空列表）才返回空，不算错误（04 §2.2）。
+    """
     today = date.today()
-    for query_date in (today, today - timedelta(days=1)):
+    for query_date in (today - timedelta(days=1), today):
         response = httpx.get(
             url, params={"date": query_date.isoformat()}, headers={"User-Agent": USER_AGENT}, timeout=30.0
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            continue
         payload = response.json()
         if payload:
-            return [_hf_paper_to_entry(item, source_name=source_name) for item in payload]
-    return []  # 今天昨天都没有，返回空不算错误（04 §2.2）
+            return [_hf_paper_to_entry(item) for item in payload]
+    return []  # 昨天今天都没有，返回空不算错误（04 §2.2）
 
 
-def _hf_paper_to_entry(item: dict, *, source_name: str) -> Entry:
+def _hf_paper_to_entry(item: dict) -> Entry:
+    """2026-07-08：huggingface-daily-papers 本身从来没有全文（只有摘要 + AI 二次摘要，
+    详见 .claude/memory/decisions.md 的核查记录），它的价值是社区筛选信号（点赞数），
+    不是独立的内容源——这里把 entry 的 `source_name` 直接改标成 `arxiv-api`，让它
+    复用 arxiv 现有的全文抓取/去重/分级逻辑（entry.url 本来就是 arxiv.org/abs/<id>），
+    不再维护一套"HF 专属"的处理路径。
+
+    HF 的筛选信号（点赞数/推荐标记）塞进 `extra`，但目前只是这次 workflow 运行期间
+    的内存对象——EnrichArticleWorkflow 组装 upsert_article_activity 的 payload 时并未
+    读取 entry.extra，不会落进 articles/documents 任何字段，重启/replay 后即丢失。
+    如果以后要把这个信号用于排序/前端展示，需要专门给 articles 表加字段并在
+    workflows.py 里显式透传（不要假设放进 extra 就等于持久化了）。
+    """
     paper = item.get("paper", {})
     arxiv_id = paper.get("id", "")
     url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
@@ -244,11 +268,11 @@ def _hf_paper_to_entry(item: dict, *, source_name: str) -> Entry:
     return Entry(
         title=title,
         url=url,
-        source_name=source_name,
+        source_name="arxiv-api",
         published=published,
         raw_summary=summary,
         low_confidence=low_confidence,
-        extra={"upvotes": item.get("paper", {}).get("upvotes", 0)},
+        extra={"upvotes": item.get("paper", {}).get("upvotes", 0), "hf_recommended": True},
     )
 
 
@@ -362,7 +386,12 @@ def _fetch_jiqizhixin(url: str, *, source_name: str) -> list[Entry]:
         # （2026-07-03 旧系统踩过的坑，见探查旧项目 jiqizhixin-fetch.py 时的记录）
         mp_match = _MP_LINK_RE.search(content_encoded)
         if mp_match:
-            url_result = "https://" + mp_match.group(0).split("#")[0]
+            # 2026-07-07：原始 HTML 里 href 属性天然写成 &amp; 转义形式，正则从
+            # content:encoded 里截出来的是未反转义的原始文本——不做 html.unescape()
+            # 就直接使用，会导致 __biz 之后的每个参数名都带上多余的 "amp;" 前缀
+            # （如 amp;mid/amp;idx/amp;sn），微信服务器识别不出这些参数，返回反爬
+            # 验证页而不是真实正文（真实批次复现：articles 表污染 4/9 篇）。
+            url_result = html_lib.unescape("https://" + mp_match.group(0).split("#")[0])
         else:
             url_result = raw_entry.get("link", "")  # 兜底：可能是搜狗中间页，标记低置信度
 

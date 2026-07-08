@@ -246,7 +246,7 @@ def _first_nonblank_line(body_md: str) -> str:
 def test_original_record_body_does_not_repeat_title():
     article = make_enriched_article(translated_title="示例标题", translated_summary="正文第一行\n\n正文第二行")
     decision = {"topic_slug": "agents", "is_new_topic": False, "zettel_worthy": False, "rationale": "r"}
-    record = aggregate._build_original_record(article, "original-abc", None, decision, [])
+    record = aggregate.build_original_record(article, "original-abc", None, decision, [])
     assert record["title"] == "示例标题"
     assert _first_nonblank_line(record["body_md"]) != f"# {record['title']}"
     assert "示例标题" not in record["body_md"]  # 标题文本完全不该出现在正文里
@@ -267,7 +267,7 @@ def test_original_and_zettel_records_have_distinct_doc_type():
     article = make_enriched_article(translated_title="示例标题", gist="这是摘要")
     decision = {"topic_slug": "agents", "is_new_topic": False, "zettel_worthy": True, "rationale": "r"}
 
-    original = aggregate._build_original_record(article, "original-abc", "202607050931-example", decision, [])
+    original = aggregate.build_original_record(article, "original-abc", "202607050931-example", decision, [])
     zettel = aggregate._build_zettel_record(article, "202607050931-example", "original-abc", decision, [])
 
     assert original["doc_type"] == "original"

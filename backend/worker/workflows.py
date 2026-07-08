@@ -8,7 +8,12 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from worker.aggregate import aggregate_activity
+    from worker.arxiv_backfill import (
+        list_arxiv_fulltext_backfill_candidates_activity,
+        refresh_original_document_activity,
+    )
     from worker.enrich import (
+        check_arxiv_fulltext_activity,
         fetch_original_activity,
         gist_activity,
         metadata_activity,
@@ -28,7 +33,7 @@ with workflow.unsafe.imports_passed_through():
         record_source_health_activity,
     )
     from worker.filter import filter_activity
-    from worker.schemas import EnrichArticleParams, PipelineParams
+    from worker.schemas import Entry, EnrichArticleParams, PipelineParams
 
 
 @workflow.defn
@@ -51,6 +56,11 @@ class EnrichArticleWorkflow:
         )
         body_md = fetch_result["body_md"]
         fetch_channel = fetch_result["fetch_channel"]
+        # .get() 而非直接索引：这个键是 2026-07-08 新加的，如果某次执行在部署新代码
+        # 前后跨越（fetch_original_activity 的历史记录来自旧代码，不含这个键），
+        # Temporal replay 用新代码重放这段历史时直接索引会抛 KeyError 导致 workflow
+        # 永久失败，需要人工 reset 才能恢复。
+        arxiv_fulltext_pending = fetch_result.get("arxiv_fulltext_pending")
 
         translated_title: str | None = None
         translated_body: str | None = None
@@ -62,9 +72,14 @@ class EnrichArticleWorkflow:
                 translate_activity,
                 args=[params.entry.title, body_md],
                 # 分块翻译内部已并发（_CHUNK_TRANSLATE_CONCURRENCY），但 arxiv 全文来源常见
-                # 30-50 个分块，300s 在真实全文批次下实测会超时，调到 600s 留够余量（见
-                # decisions.md "arxiv 只抓到摘要"修复记录）。
-                start_to_close_timeout=timedelta(seconds=600),
+                # 30-50 个分块，300s→600s 都在真实全文批次下踩过超时（见 decisions.md
+                # "arxiv 只抓到摘要"修复记录 + 2026-07-07 M7 观察期批次 5 篇超大论文
+                # 翻译超时记录）。2026-07-07 起 translate_activity 内部按分块完成顺序上报
+                # heartbeat，改用 heartbeat_timeout 判断"真卡死"（90s 无新心跳），
+                # 不再需要靠不断调大固定 start_to_close_timeout 硬顶超大论文——硬上限本身
+                # 放宽到 1800s 只是兜底，正常不会跑满。
+                start_to_close_timeout=timedelta(seconds=1800),
+                heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=default_retry,
             )
             translated_title = translation["translated_title"]
@@ -109,6 +124,7 @@ class EnrichArticleWorkflow:
                 "novelty_signal": {"keywords": metadata["novelty_keywords"]},
                 "word_count": compute_word_count(final_body),
                 "translation_fallback_notice": translation_fallback_notice,
+                "arxiv_fulltext_pending": arxiv_fulltext_pending,
             },
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=default_retry,
@@ -234,3 +250,106 @@ class AInewsPipelineWorkflow:
             start_to_close_timeout=timedelta(seconds=10),
         )
         return entries
+
+
+@workflow.defn
+class ArxivFulltextBackfillWorkflow:
+    """每日独立调度（09:00 Asia/Shanghai，与主流水线同一时间但完全独立的 Temporal
+    Schedule，见 worker.py::ensure_arxiv_fulltext_backfill_schedule），跟主流水线的
+    fetch/filter/enrich/aggregate 完全解耦。2026-07-08 新增，见
+    .claude/memory/decisions.md。
+
+    只更新 documents.original 本身（保留原有 topic_slug/tags/related_zettel_id），
+    不碰 Topic/Daily/Digest——这是内容质量回补，不是"今天的新闻"，不应该在
+    Topic/Daily 里产生新的当天条目。
+    """
+
+    @workflow.run
+    async def run(self) -> dict:
+        candidates = await workflow.execute_activity(
+            list_arxiv_fulltext_backfill_candidates_activity,
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        if not candidates:
+            return {"checked": 0, "ready": 0, "upgraded": 0}
+
+        # 先做一次便宜的检查（单次 HTTP 请求，不含 LLM 调用），筛掉仍然只有摘要的候选，
+        # 避免对每天都还没等到全文的文章重复浪费翻译/摘要/元数据这几个 LLM 调用。
+        default_retry = RetryPolicy(maximum_attempts=3)
+        availability = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    check_arxiv_fulltext_activity,
+                    c["url"],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=default_retry,
+                )
+                for c in candidates
+            ),
+            return_exceptions=True,
+        )
+        ready = []
+        for c, avail in zip(candidates, availability):
+            if isinstance(avail, BaseException):
+                # 2026-07-08 修复：此前这里只用 `avail is True` 过滤，check_arxiv_fulltext_
+                # activity 耗尽重试后抛出的异常会被无声当成"未就绪"丢弃，日志里完全看不出
+                # 是真的还没渲染好还是探测本身在报错，排查方向会找错。
+                workflow.logger.warning(f"arxiv 回补：{c['url']} 可用性检查失败（不影响其余候选）: {avail}")
+                continue
+            if avail is True:
+                ready.append(c)
+        if not ready:
+            return {"checked": len(candidates), "ready": 0, "upgraded": 0}
+
+        batch_id = f"arxiv-fulltext-backfill-{workflow.info().start_time.strftime('%Y-%m-%d')}"
+        enrich_results = await asyncio.gather(
+            *(
+                workflow.execute_child_workflow(
+                    EnrichArticleWorkflow.run,
+                    EnrichArticleParams(
+                        entry=Entry(
+                            title=c["fetched_title"],
+                            url=c["url"],
+                            source_name="arxiv-api",
+                            published=c["published_at"],
+                            raw_summary="",
+                            low_confidence=False,
+                            extra={},
+                        ),
+                        batch_id=batch_id,
+                    ),
+                    id=f"{batch_id}-{c['doc_id']}",
+                )
+                for c in ready
+            ),
+            return_exceptions=True,
+        )
+
+        succeeded = []
+        for c, result in zip(ready, enrich_results):
+            if isinstance(result, BaseException):
+                workflow.logger.warning(f"arxiv 回补：{c['url']} 重新 enrich 失败（不影响其余候选）: {result}")
+                continue
+            succeeded.append(c)
+
+        # 候选之间互不依赖，跟前两段一样一次性并发发起，不要逐个 await 串行等待
+        # （2026-07-08 修复：此前是 for 循环里逐条 await，总耗时随候选数线性叠加）。
+        refresh_results = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    refresh_original_document_activity,
+                    c,
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                for c in succeeded
+            ),
+            return_exceptions=True,
+        )
+        upgraded = 0
+        for c, result in zip(succeeded, refresh_results):
+            if isinstance(result, BaseException):
+                workflow.logger.warning(f"arxiv 回补：{c['url']} 写回正文失败（不影响其余候选）: {result}")
+                continue
+            upgraded += 1
+
+        return {"checked": len(candidates), "ready": len(ready), "upgraded": upgraded}

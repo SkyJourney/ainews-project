@@ -22,19 +22,21 @@ import ipaddress
 import os
 import re
 import socket
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
 import trafilatura
+from instructor.core.exceptions import IncompleteOutputException, InstructorRetryException
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 from temporalio import activity
 
 from worker.db import upsert_enriched_article
-from worker.llm_client import call_structured
+from worker.llm_client import DEFAULT_MAX_TOKENS, call_structured
 from worker.schemas import (
     ArticleGist,
     ArticleMetadata,
@@ -47,6 +49,15 @@ USER_AGENT = "ainews-service/0.1 (+https://github.com/SkyJourney/ainews-project)
 TRANSLATE_MODEL = "deepseek-v4-flash"
 GIST_MODEL = "deepseek-v4-flash"
 METADATA_MODEL = "deepseek-v4-flash"
+
+# 2026-07-08：分块翻译调用异常（IncompleteOutputException 截断 / InstructorRetryException
+# JSON 格式错误）此前直接放弃保留原文，一次重试都没有——只有"没报异常但 CJK 占比过低"
+# 才有重试（还是同一个模型）。真实批次里这两类异常反复出现，换 qwen3.6-flash 兜底重试
+# 一次：InstructorRetryException 更像是 deepseek-v4-flash 结构化输出偶发的格式问题，换
+# 模型直接命中；IncompleteOutputException 是分块内容密度高、默认 8000 token 预算不够，
+# 单纯换模型不一定够，顺带把这次重试的 max_tokens 调大。见 _translate_chunk_with_retry。
+_TRANSLATE_FALLBACK_MODEL = "qwen3.6-flash"
+_TRANSLATE_FALLBACK_MAX_TOKENS = DEFAULT_MAX_TOKENS * 2
 MAX_CHUNK_CHARS = 2000
 
 # Jina Reader 兜底触发条件，照搬旧项目 fetch-with-assets.py 已验证的清单
@@ -412,9 +423,23 @@ def _dedup_repeated_paragraphs(markdown: str) -> str:
     return "\n\n".join(kept)
 
 
+# trafilatura/Jina/Playwright 抽出来的 markdown 正文开头常常自带一份文章标题（页面
+# 自身的 H1），跟 documents.title 字段（独立存储，前端详情页单独渲染一次）重复，会
+# 造成"标题渲染两遍"——此前只在 arxiv 全文页专门处理过，2026-07-07 抽查发现非
+# arxiv 的普通新闻源同样会中招（真实批次：89 篇当日 original 里 11 篇能观察到明显
+# 重复），这里挪到三通道共用的清洗管线里统一生效。只去掉第一行 H1，不做更激进的
+# 处理（个别标题换行导致的孤立残留，比整篇重复渲染的视觉问题小得多）。
+_LEADING_H1_RE = re.compile(r"^#[ \t]+.+?\n+")
+
+
+def _strip_leading_title_h1(markdown: str) -> str:
+    return _LEADING_H1_RE.sub("", markdown, count=1)
+
+
 def _clean_fetched_markdown(markdown: str) -> str:
-    """三个抓取通道共用的最终 markdown 清洗管线，按顺序：已知区块截断 → 站点头部
-    导航剥离 → 跟踪像素引用清理 → 整段重复内容去重。"""
+    """三个抓取通道共用的最终 markdown 清洗管线，按顺序：开头重复标题剥离 → 已知区块
+    截断 → 站点头部导航剥离 → 跟踪像素引用清理 → 整段重复内容去重。"""
+    markdown = _strip_leading_title_h1(markdown)
     markdown = _strip_known_boilerplate(markdown)
     markdown = _strip_openai_header_nav(markdown)
     markdown = _strip_tracking_pixel_refs(markdown)
@@ -435,13 +460,6 @@ def _arxiv_fulltext_url(url: str) -> str | None:
     m = _ARXIV_ABS_RE.match(url.strip())
     return f"https://arxiv.org/html/{m.group(1)}" if m else None
 
-
-# arxiv 全文页/摘要页抽出来的 markdown 正文开头都自带一份论文标题——跟 documents.title
-# 字段（独立存储、前端详情页单独渲染一次）重复，会造成"标题渲染两遍"（M6 曾经修过
-# aggregate.py 自己拼接标题导致的同款问题，这次是抓取源内容本身自带的，见
-# .claude/memory/known_issues.md）。全文页只需要去掉第一行 H1（个别论文标题换行会有
-# 一小段孤立残留，比整篇重复渲染的视觉问题小得多，不做更激进的处理）。
-_ARXIV_LEADING_H1_RE = re.compile(r"^#[ \t]+.+?\n+")
 
 # 摘要页固定的头部结构：分类标题行 + 提交日期 + "Title:实际标题"行，三者都是重复/
 # 元数据，不是正文；"Title:"这一行经常带 4 个以上前导空格，如果只清标题不清这段
@@ -489,12 +507,44 @@ def _try_arxiv_fulltext(url: str) -> str | None:
         with_metadata=False,
         include_images=True,
     )
-    if markdown:
-        markdown = _ARXIV_LEADING_H1_RE.sub("", markdown, count=1)
+    # 开头重复标题的剥离已经收进 _clean_fetched_markdown 统一处理，这里不用再单独调用。
     return _clean_fetched_markdown(markdown) if markdown else None
 
 
-def _fetch_direct(url: str) -> str | None:
+def _arxiv_fulltext_available(url: str) -> bool:
+    """轻量版可用性探测：只确认 arxiv 全文 HTML 端点已经渲染出真实正文，不下载/处理
+    配图、不做 markdown 清洗——供 check_arxiv_fulltext_activity 用。真正就绪的候选会
+    交给 EnrichArticleWorkflow 走 `_try_arxiv_fulltext` 完整抓取（届时才值得付出下载/
+    处理配图的成本），这里只用 trafilatura 快速判断页面是否已经有实际内容，成功判定
+    标准跟 `_try_arxiv_fulltext` 保持一致（只看 markdown 是否非空，不引入新的长度
+    阈值，避免两边判定口径不一致导致"探测说就绪、真抓却还没渲染完"这类边界不一致）。
+    """
+    fulltext_url = _arxiv_fulltext_url(url)
+    if not fulltext_url:
+        return False
+    try:
+        response = _safe_get(fulltext_url, headers={"User-Agent": USER_AGENT}, timeout=30.0)
+    except (httpx.HTTPError, SSRFBlockedError):
+        return False
+    if response.status_code != 200:
+        return False
+    markdown = trafilatura.extract(response.text, url=fulltext_url, output_format="markdown", with_metadata=False)
+    return bool(markdown)
+
+
+@activity.defn
+def check_arxiv_fulltext_activity(url: str) -> bool:
+    """`worker/arxiv_backfill.py` 专用：只做一次轻量 HTTP 请求判断"这篇文章现在有没有
+    全文了"，不含任何 LLM 调用、不下载配图——先用这个便宜的检查筛掉仍然只有摘要的
+    候选，避免对每天都还没等到全文的文章重复浪费翻译/摘要/元数据这几个 LLM 调用
+    （2026-07-08 修复：此前直接复用 `_try_arxiv_fulltext`，等于对每个候选都完整跑了
+    一遍配图下载+trafilatura 抽取的真实抓取开销，结果只取一个 bool 就整体丢弃，真正
+    就绪的候选紧接着还要被 EnrichArticleWorkflow 完整重新抓一遍，全文 HTML 和每张
+    配图都被下载了两次）。"""
+    return _arxiv_fulltext_available(url)
+
+
+def _fetch_direct(url: str) -> tuple[str | None, bool]:
     """状态①：direct 通道，唯一会处理配图的通道。命中 Jina 触发条件（含重定向跳到
     不安全地址，按 SSRF 拦截处理）时返回 None 交给调用方走兜底；其余 HTTP 错误（如真实
     的 404）原样抛出——由调用方 fetch_original_activity 统一捕获并降级到下一通道，
@@ -502,18 +552,20 @@ def _fetch_direct(url: str) -> str | None:
 
     arxiv 来源会先尝试全文 HTML 端点（见 `_try_arxiv_fulltext`），命中就直接返回；
     未命中（非 arxiv 来源，或 arxiv 全文暂不可用）走下面原有的摘要页/原页面抓取逻辑，
-    行为与此前完全一致。
+    行为与此前完全一致。返回值第二项标记"这次是否命中了 arxiv 全文"——供
+    fetch_original_activity 计算 `arxiv_fulltext_pending`（2026-07-08 新增，供每日
+    arxiv 全文回补 workflow 查询候选，见 worker/arxiv_backfill.py）。
     """
     fulltext = _try_arxiv_fulltext(url)
     if fulltext:
-        return fulltext
+        return fulltext, True
 
     try:
         response = _safe_get(url, headers={"User-Agent": USER_AGENT}, timeout=30.0)
     except (httpx.TimeoutException, SSRFBlockedError):
-        return None
+        return None, False
     if response.status_code in _JINA_TRIGGER_STATUS:
-        return None
+        return None, False
     response.raise_for_status()
 
     article_key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
@@ -524,11 +576,16 @@ def _fetch_direct(url: str) -> str | None:
         html_with_images_processed, url=url, output_format="markdown", with_metadata=False, include_images=True
     )
     if not markdown:
-        return markdown
-    markdown = _clean_fetched_markdown(markdown)
+        return markdown, False
+    # arxiv 摘要页专属清洗必须先于通用管线执行：_clean_arxiv_abs_markdown 的正则依赖
+    # "字符串仍以原始的 # 分类标题开头"这个结构（一次性连着剥掉分类标题+提交日期+
+    # Title 行），如果先跑通用管线（_strip_leading_title_h1 会把开头 H1 剥掉），这段
+    # 结构被破坏，正则整体匹配失败，[Submitted...]/Title:/View PDFAbstract: 这些样板
+    # 文字会原样残留进正文（2026-07-08 真实踩过的回归，通用清洗管线泛化时引入）。
     if _ARXIV_ABS_RE.match(url.strip()):
         markdown = _clean_arxiv_abs_markdown(markdown)
-    return markdown
+    markdown = _clean_fetched_markdown(markdown)
+    return markdown, False
 
 
 def _fetch_via_jina(url: str) -> str | None:
@@ -578,11 +635,31 @@ def _build_placeholder_body(url: str) -> str:
     return f"（全部抓取通道均失败，无法获取原文正文，请通过原文链接查阅：{url}）"
 
 
+def _fetch_via_jina_channel(url: str) -> tuple[str | None, bool]:
+    return _fetch_via_jina(url), False
+
+
+def _fetch_via_playwright_channel(url: str) -> tuple[str | None, bool]:
+    return _fetch_via_playwright(url), False
+
+
+# 三个通道统一返回 (markdown, got_arxiv_fulltext) 二元组——只有 direct 通道会真正
+# 命中 arxiv 全文端点，jina/playwright 固定传 False，但形状保持一致，调用方不需要
+# 再按通道名字字符串特判返回值该怎么拆包（2026-07-08 修复：此前 jina/playwright 仍
+# 返回裸字符串，fetch_original_activity 里得靠 `if channel == "direct"` 才能正确拆包）。
 _FETCH_CHANNELS = (
     (_fetch_direct, "direct"),
-    (_fetch_via_jina, "jina"),
-    (_fetch_via_playwright, "playwright"),
+    (_fetch_via_jina_channel, "jina"),
+    (_fetch_via_playwright_channel, "playwright"),
 )
+
+
+def _arxiv_fulltext_pending(is_arxiv: bool, got_arxiv_fulltext: bool = False) -> bool | None:
+    """三处调用（SSRF 拦截 / 抓取成功 / 全部通道失败）统一走这一个判定，避免规则
+    分散在三处、改一处漏一处（2026-07-08 重构）。"""
+    if not is_arxiv:
+        return None
+    return not got_arxiv_fulltext
 
 
 @activity.defn
@@ -597,24 +674,42 @@ def fetch_original_activity(url: str) -> dict:
     _fetch_via_jina 遇到这类错误会直接抛出、穿透整个 activity 导致文章从批次消失——
     这里统一捕获，当作"这个通道失败"处理并继续尝试下一通道，而不是让异常中断整个
     降级链条。
+
+    返回值里的 `arxiv_fulltext_pending`（仅 arxiv 摘要页 URL 才有意义，非 arxiv 为
+    None）标记"这篇文章这次有没有拿到 arxiv 全文"——`_try_arxiv_fulltext` 未命中时
+    为 True，供每日 arxiv 全文回补 workflow（`worker/arxiv_backfill.py`）查询候选。
     """
+    is_arxiv = _arxiv_fulltext_url(url) is not None
+
     try:
         _assert_public_url(url)
     except SSRFBlockedError as exc:
         activity.logger.warning(f"拒绝抓取不安全的 URL，直接写占位正文：{exc}")
-        return {"body_md": _build_placeholder_body(url), "fetch_channel": "placeholder"}
+        return {
+            "body_md": _build_placeholder_body(url),
+            "fetch_channel": "placeholder",
+            "arxiv_fulltext_pending": _arxiv_fulltext_pending(is_arxiv),
+        }
 
     for fetch_fn, channel in _FETCH_CHANNELS:
         try:
-            body_md = fetch_fn(url)
+            body_md, got_arxiv_fulltext = fetch_fn(url)
         except httpx.HTTPError as exc:
             activity.logger.warning(f"{channel} 通道抓取失败（{exc!r}），尝试下一通道：{url}")
             continue
         if body_md:
-            return {"body_md": body_md, "fetch_channel": channel}
+            return {
+                "body_md": body_md,
+                "fetch_channel": channel,
+                "arxiv_fulltext_pending": _arxiv_fulltext_pending(is_arxiv, got_arxiv_fulltext),
+            }
 
     activity.logger.warning(f"direct/jina/playwright 全部抓取通道失败，写入占位正文：{url}")
-    return {"body_md": _build_placeholder_body(url), "fetch_channel": "placeholder"}
+    return {
+        "body_md": _build_placeholder_body(url),
+        "fetch_channel": "placeholder",
+        "arxiv_fulltext_pending": _arxiv_fulltext_pending(is_arxiv),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -711,17 +806,130 @@ _TRANSLATE_RETRY_SYSTEM_PROMPT = _TRANSLATE_SYSTEM_PROMPT + (
 )
 
 
-def _translate_chunk(chunk: str, *, retry: bool = False) -> str:
+def _translate_chunk(
+    chunk: str, *, retry: bool = False, model: str = TRANSLATE_MODEL, max_tokens: int = DEFAULT_MAX_TOKENS
+) -> str:
     result = call_structured(
-        model=TRANSLATE_MODEL,
+        model=model,
         system_prompt=_TRANSLATE_RETRY_SYSTEM_PROMPT if retry else _TRANSLATE_SYSTEM_PROMPT,
         user_content=chunk,
         response_model=ChunkTranslation,
+        max_tokens=max_tokens,
     )
     return result.translated_text
 
 
 _CHUNK_MAX_RETRIES = 2
+
+# 2026-07-08：主模型 + 换模型兜底都失败后的第三层兜底——对半切开分别翻译再拼接，
+# 递归直到低于这个下限就放弃细分（不是"切了也没用"，是避免极端情况下无限切分）。
+_MIN_SPLIT_CHARS = 400
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_CODE_FENCE_RE = re.compile(r"^\s*```")
+
+
+def _atomic_blocks(text: str) -> list[str]:
+    """按行扫描，把表格连续行、代码块内部行分别合并成不可拆分的原子块，其余行按
+    空行分段——切分候选点只能落在原子块之间，绝不能切进表格或代码块内部（切在表格
+    中间会导致两半各自都不是合法的表格片段，模型翻译/拼接后结构必然错乱，比保留
+    原文更糟）。"""
+    lines = text.split("\n")
+    blocks: list[str] = []
+    buf: list[str] = []
+    in_code = False
+    in_table = False
+
+    def flush():
+        if buf:
+            blocks.append("\n".join(buf))
+            buf.clear()
+
+    for line in lines:
+        if _CODE_FENCE_RE.match(line):
+            buf.append(line)
+            if in_code:
+                flush()
+            in_code = not in_code
+            continue
+        if in_code:
+            buf.append(line)
+            continue
+
+        is_table_row = bool(_TABLE_ROW_RE.match(line))
+        if is_table_row:
+            if not in_table:
+                flush()
+                in_table = True
+            buf.append(line)
+            continue
+        if in_table:
+            flush()
+            in_table = False
+        buf.append(line)
+        if line.strip() == "":
+            flush()
+
+    flush()
+    return [b for b in blocks if b.strip()]
+
+
+def _split_chunk_at_safe_boundary(chunk: str) -> list[str] | None:
+    """在原子块边界把一个分块尽量均衡地切成两半；如果整个分块本质上只有一个不可拆的
+    原子块（比如从头到尾都是同一张大表/同一段代码），返回 None——调用方必须放弃细分，
+    宁可让这一整块保留原文，也不能冒险切坏表格/代码结构。"""
+    blocks = _atomic_blocks(chunk)
+    if len(blocks) < 2:
+        return None
+
+    sizes = [len(b) for b in blocks]
+    target = sum(sizes) / 2
+    acc = 0
+    split_at = len(blocks) // 2
+    for i, size in enumerate(sizes):
+        acc += size
+        if acc >= target:
+            split_at = i + 1
+            break
+
+    split_at = max(1, min(split_at, len(blocks) - 1))
+    left = "\n".join(blocks[:split_at]).strip()
+    right = "\n".join(blocks[split_at:]).strip()
+    if not left or not right:
+        return None
+    return [left, right]
+
+
+def _translate_oversized_chunk(chunk: str, cause: Exception) -> tuple[str, bool]:
+    """策略链（主模型+换模型兜底）都失败后调用：尝试在安全边界切成两半分别翻译再
+    拼接，递归直到低于 `_MIN_SPLIT_CHARS` 或找不到安全切点为止。返回 (译文, 是否仍
+    有残留未翻译的部分)——即使拆分后大部分内容翻译成功，只要有任何一小块最终仍
+    保留原文，也要如实上报，不能因为"大部分翻好了"就悄悄当作完全成功（04 §2.4
+    硬约束）。切开的每一半直接用 _TRANSLATE_FALLBACK_MODEL（已经证明比主模型更能
+    处理这类内容），不再退回已知会在这块内容上失败的主模型（2026-07-08 修复：此前
+    这里调用不带 model 参数的 _translate_chunk，默认落回主模型，等于对已知失败的
+    内容重复发起注定失败的调用）。"""
+    if len(chunk) <= _MIN_SPLIT_CHARS:
+        activity.logger.warning(f"[chunk_diag] 分块已达细分下限仍失败，保留原文：{cause!r}")
+        return chunk, True
+
+    halves = _split_chunk_at_safe_boundary(chunk)
+    if halves is None:
+        activity.logger.warning(f"[chunk_diag] 分块整体是不可拆的原子块（如单张大表/单段代码），保留原文：{cause!r}")
+        return chunk, True
+
+    translated_parts = []
+    had_failure = False
+    for half in halves:
+        try:
+            translated_parts.append(
+                _translate_chunk(half, model=_TRANSLATE_FALLBACK_MODEL, max_tokens=_TRANSLATE_FALLBACK_MAX_TOKENS)
+            )
+        except (IncompleteOutputException, InstructorRetryException) as half_exc:
+            part_text, part_failed = _translate_oversized_chunk(half, half_exc)
+            translated_parts.append(part_text)
+            had_failure = had_failure or part_failed
+    return "\n\n".join(translated_parts), had_failure
 
 # 分块翻译并发上限：分块彼此独立、各自一次网络请求，线程池并发是安全的加速手段；
 # 但 Temporal 本身已经按文章级别做 fan-out（activity_executor 最多 20 个并发 activity，
@@ -735,22 +943,73 @@ _CHUNK_MAX_RETRIES = 2
 # aggregate_activity 超时。
 _CHUNK_TRANSLATE_CONCURRENCY = 2
 
+# 分块翻译策略链：依次尝试的 (model, max_tokens) 组合，全部失败才进入安全切分兜底
+# （_translate_oversized_chunk）。以后再加一层兜底模型只需要在这里追加一项，不需要
+# 再嵌套一层 try/except（2026-07-08 重构，原先是两层嵌套的 if/except）。
+_TRANSLATE_STRATEGIES: list[tuple[str, int]] = [
+    (TRANSLATE_MODEL, DEFAULT_MAX_TOKENS),
+    (_TRANSLATE_FALLBACK_MODEL, _TRANSLATE_FALLBACK_MAX_TOKENS),
+]
 
-def _translate_chunk_with_retry(chunk: str) -> tuple[str, bool, int]:
-    """返回 (译文, 是否判定为噪声跳过翻译, 实际重试次数)。
 
-    最多重试两次（而非一次）：实测发现同一分块独立重跑结果会摆动（模型偶发漏译
-    开头一句话，换一次采样就正常了），多一次重试能吃掉大部分这类纯随机性失败，
-    而不需要放宽 CJK 占比阈值本身（放宽阈值会连真正的翻译缺失一起放过）。
+class ChunkTranslateResult(NamedTuple):
+    """单个分块的翻译结果。text：最终译文；skipped_as_noise：是否判定为图表/数据
+    噪声直接跳过翻译；retry_count：CJK 复检循环实际重试次数；had_residual_failure：
+    安全切分兜底用尽后是否仍有残留部分保留了原文。"""
+
+    text: str
+    skipped_as_noise: bool
+    retry_count: int
+    had_residual_failure: bool
+
+
+def _translate_chunk_with_retry(chunk: str) -> ChunkTranslateResult:
+    """依次尝试 _TRANSLATE_STRATEGIES 策略链，全部失败再走安全切分兜底；成功后做一次
+    CJK 占比复检重试——最多重试两次（而非一次）：实测发现同一分块独立重跑结果会
+    摆动（模型偶发漏译开头一句话，换一次采样就正常了），多一次重试能吃掉大部分这类
+    纯随机性失败，而不需要放宽 CJK 占比阈值本身（放宽阈值会连真正的翻译缺失一起
+    放过）。
+
+    复检重试固定复用"策略链里刚刚成功的那个模型"，且本身包了 try/except（2026-07-08
+    修复：此前复检循环无条件用默认主模型重试且没有异常保护——如果策略链最终生效的
+    是换模型兜底或安全切分兜底，复检会对已经验证会失败的模型/内容再发起一次无保护
+    调用，真实跑出过把刚成功的译文整体丢弃、退化成保留原文的情况）。
     """
     if _is_mostly_noise(chunk):
-        return chunk, True, 0
-    translated = _translate_chunk(chunk)
+        return ChunkTranslateResult(chunk, True, 0, False)
+
+    translated = ""
+    effective_model = _TRANSLATE_STRATEGIES[0][0]
+    last_exc: Exception | None = None
+    for model, max_tokens in _TRANSLATE_STRATEGIES:
+        try:
+            translated = _translate_chunk(chunk, model=model, max_tokens=max_tokens)
+            effective_model = model
+            last_exc = None
+            break
+        except (IncompleteOutputException, InstructorRetryException) as exc:
+            activity.logger.warning(f"[chunk_diag] {model} 翻译调用异常：{exc!r}")
+            last_exc = exc
+
+    had_residual_failure = False
+    if last_exc is not None:
+        # 策略链全部失败，大概率是这块内容本身密度太高撞了 token 预算，不是模型能力
+        # 问题——尝试在安全边界切开分别翻译再拼接，而不是直接放弃整块保留原文。
+        activity.logger.warning(f"[chunk_diag] 翻译策略链全部失败，尝试安全切分后分别翻译：{last_exc!r}")
+        translated, had_residual_failure = _translate_oversized_chunk(chunk, last_exc)
+        effective_model = _TRANSLATE_FALLBACK_MODEL
+
     retry_count = 0
-    while _cjk_ratio_excluding_code(translated) < _CHUNK_RETRY_CJK_THRESHOLD and retry_count < _CHUNK_MAX_RETRIES:
-        translated = _translate_chunk(chunk, retry=True)
-        retry_count += 1
-    return translated, False, retry_count
+    if not had_residual_failure:
+        while _cjk_ratio_excluding_code(translated) < _CHUNK_RETRY_CJK_THRESHOLD and retry_count < _CHUNK_MAX_RETRIES:
+            try:
+                translated = _translate_chunk(chunk, retry=True, model=effective_model)
+            except (IncompleteOutputException, InstructorRetryException) as exc:
+                # 复检重试本身失败，保留复检前已经拿到的译文，不再无保护地冒泡异常。
+                activity.logger.warning(f"[chunk_diag] CJK 复检重试调用异常，保留复检前译文：{exc!r}")
+                break
+            retry_count += 1
+    return ChunkTranslateResult(translated, False, retry_count, had_residual_failure)
 
 
 def _review_translation_completeness(original_body: str, translated_body: str) -> bool:
@@ -796,9 +1055,9 @@ def translate_activity(title: str, body_md: str) -> dict:
 
     def _translate_one(i: int, chunk: str) -> None:
         try:
-            translated, skipped_as_noise, retry_count = _translate_chunk_with_retry(chunk)
-        except Exception as exc:  # noqa: BLE001 - 单个分块的翻译调用异常（如遇到超长分块
-            # 触发 IncompleteOutputException）不该打断整篇文章的翻译；保留原文分块，
+            translated, skipped_as_noise, retry_count, had_residual_failure = _translate_chunk_with_retry(chunk)
+        except Exception as exc:  # noqa: BLE001 - 单个分块的翻译调用异常（三层兜底——换模型/
+            # 安全切分——全部失败才会走到这里）不该打断整篇文章的翻译；保留原文分块，
             # 明确记为降级，而不是让整个 activity 崩溃、这篇文章从批次里彻底消失。
             activity.logger.warning(
                 f"[chunk_diag] title={title[:40]!r} chunk={i}/{len(chunks)} 翻译调用异常，保留原文：{exc!r}"
@@ -808,6 +1067,10 @@ def translate_activity(title: str, body_md: str) -> dict:
             return
 
         translated_chunks[i] = translated
+        if had_residual_failure:
+            # 安全切分兜底翻完了大部分内容，但递归到底仍有一小块保留原文——不能因为
+            # "大部分翻好了"就悄悄当作完全成功，如实计入失败分块（04 §2.4 硬约束）。
+            failed_chunk_indices.append(i)
 
         # 诊断专用：逐块记录 CJK 占比/残留命中情况，用于精确定位整体校验失败的根因，
         # 附带记录本块是否被跳过翻译/实际重试了几次，方便评估修复效果。
@@ -826,10 +1089,19 @@ def translate_activity(title: str, body_md: str) -> dict:
     # 配置的 start_to_close_timeout（真实批次实测踩到过）。每个分块各自独立起一次
     # call_structured 网络请求，线程池并发对 I/O 密集型调用是安全且有效的加速手段；
     # `_CHUNK_TRANSLATE_CONCURRENCY` 控制并发上限，避免瞬间打满网关。
+    #
+    # 2026-07-07：按提交顺序 for future in futures 等待时，futures[0] 没完成前不会看到
+    # futures[5]（可能早就完成了）的进度——心跳必须按"实际完成顺序"上报才能反映真实
+    # 进度，否则超大论文（100+ 分块）翻译到一半也会显得"很久没心跳"。改用 as_completed
+    # 逐块上报心跳，配合 workflows.py 新增的 heartbeat_timeout，让"真卡死"能被快速
+    # 发现，同时不再需要靠不断调大固定 start_to_close_timeout 硬顶超大论文。
     with ThreadPoolExecutor(max_workers=min(_CHUNK_TRANSLATE_CONCURRENCY, len(chunks) or 1)) as pool:
-        futures = [pool.submit(_translate_one, i, chunk) for i, chunk in enumerate(chunks)]
-        for future in futures:
+        futures = {pool.submit(_translate_one, i, chunk): i for i, chunk in enumerate(chunks)}
+        done_count = 0
+        for future in as_completed(futures):
             future.result()  # _translate_one 内部已捕获单块翻译异常，这里正常不会再抛出
+            done_count += 1
+            activity.heartbeat(f"{done_count}/{len(chunks)} 个分块翻译完成")
 
     translated_body = "\n\n".join(translated_chunks)
 

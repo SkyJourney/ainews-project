@@ -22,7 +22,12 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from worker.aggregate import aggregate_activity
+from worker.arxiv_backfill import (
+    list_arxiv_fulltext_backfill_candidates_activity,
+    refresh_original_document_activity,
+)
 from worker.enrich import (
+    check_arxiv_fulltext_activity,
     fetch_original_activity,
     gist_activity,
     metadata_activity,
@@ -37,7 +42,7 @@ from worker.fetch import (
 )
 from worker.filter import filter_activity
 from worker.schemas import PipelineParams
-from worker.workflows import AInewsPipelineWorkflow, EnrichArticleWorkflow
+from worker.workflows import AInewsPipelineWorkflow, ArxivFulltextBackfillWorkflow, EnrichArticleWorkflow
 
 # write_activity（worker/write.py）从 2026-07-06 起不再单独注册为 Temporal activity——
 # aggregate_activity 内部直接调用它（普通函数调用，见 aggregate.py 顶部说明），不需要
@@ -47,6 +52,7 @@ TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "ainews-task-queue"
 MAX_ACTIVITY_WORKERS = 20
 PIPELINE_SCHEDULE_ID = "ainews-pipeline-daily"
+ARXIV_BACKFILL_SCHEDULE_ID = "ainews-arxiv-fulltext-backfill-daily"
 
 
 async def ensure_pipeline_schedule(client: Client) -> None:
@@ -73,6 +79,28 @@ async def ensure_pipeline_schedule(client: Client) -> None:
         pass
 
 
+async def ensure_arxiv_fulltext_backfill_schedule(client: Client) -> None:
+    """幂等确保 arxiv 全文回补的每日调度存在（2026-07-08 新增，同 09:00 Asia/Shanghai，
+    但是完全独立的 workflow/schedule，不影响主流水线，见 .claude/memory/decisions.md）。"""
+    try:
+        await client.create_schedule(
+            ARXIV_BACKFILL_SCHEDULE_ID,
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    ArxivFulltextBackfillWorkflow.run,
+                    id=f"{ARXIV_BACKFILL_SCHEDULE_ID}-run",
+                    task_queue=TASK_QUEUE,
+                ),
+                spec=ScheduleSpec(
+                    cron_expressions=["0 9 * * *"],
+                    time_zone_name="Asia/Shanghai",
+                ),
+            ),
+        )
+    except ScheduleAlreadyRunningError:
+        pass
+
+
 async def main() -> None:
     # 此前完全没有配置 logging，activity.logger/workflow.logger 的调用（含 enrich.py 的
     # [chunk_diag] 诊断日志）和 Temporal SDK 自身的内部日志都被静默丢弃，`docker logs`
@@ -81,12 +109,14 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     client = await Client.connect(TEMPORAL_HOST, data_converter=pydantic_data_converter)
     await ensure_pipeline_schedule(client)
+    await ensure_arxiv_fulltext_backfill_schedule(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
         workflows=[
             AInewsPipelineWorkflow,
             EnrichArticleWorkflow,
+            ArxivFulltextBackfillWorkflow,
         ],
         activities=[
             preflight_activity,
@@ -100,6 +130,9 @@ async def main() -> None:
             metadata_activity,
             upsert_article_activity,
             aggregate_activity,
+            check_arxiv_fulltext_activity,
+            list_arxiv_fulltext_backfill_candidates_activity,
+            refresh_original_document_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=MAX_ACTIVITY_WORKERS),
         max_concurrent_activities=MAX_ACTIVITY_WORKERS,

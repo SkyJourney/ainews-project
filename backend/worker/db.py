@@ -116,6 +116,7 @@ def upsert_enriched_article(
     novelty_signal: dict | None = None,
     word_count: int | None = None,
     translation_fallback_notice: str | None = None,
+    arxiv_fulltext_pending: bool | None = None,
 ) -> None:
     """enrich 阶段完成后一次性 upsert 整条记录，status 固定写 'enriched'。
 
@@ -133,14 +134,14 @@ def upsert_enriched_article(
                     status, original_text, translation_needed, translated_title,
                     translated_summary, gist, content_hash, fetch_channel, published_at,
                     entities, content_type, novelty_signal, word_count, translation_fallback_notice,
-                    enriched_at
+                    arxiv_fulltext_pending, enriched_at
                 ) VALUES (
                     :url, :source_name, :batch_id, :fetched_title, :fetched_summary,
                     'enriched', :original_text, :translation_needed, :translated_title,
                     :translated_summary, :gist, :content_hash, :fetch_channel, :published_at,
                     CAST(:entities AS JSONB), :content_type, CAST(:novelty_signal AS JSONB),
                     :word_count, :translation_fallback_notice,
-                    now()
+                    :arxiv_fulltext_pending, now()
                 )
                 ON CONFLICT (url) DO UPDATE SET
                     source_name = EXCLUDED.source_name,
@@ -161,6 +162,7 @@ def upsert_enriched_article(
                     novelty_signal = EXCLUDED.novelty_signal,
                     word_count = EXCLUDED.word_count,
                     translation_fallback_notice = EXCLUDED.translation_fallback_notice,
+                    arxiv_fulltext_pending = EXCLUDED.arxiv_fulltext_pending,
                     enriched_at = now()
                 """
             ),
@@ -183,6 +185,7 @@ def upsert_enriched_article(
                 "novelty_signal": json.dumps(novelty_signal if novelty_signal is not None else {}),
                 "word_count": word_count,
                 "translation_fallback_notice": translation_fallback_notice,
+                "arxiv_fulltext_pending": arxiv_fulltext_pending,
             },
         )
 
@@ -194,6 +197,54 @@ def fetch_enriched_articles(batch_id: str) -> list[dict]:
         rows = conn.execute(
             text("SELECT * FROM articles WHERE batch_id = :batch_id AND status = 'enriched'"),
             {"batch_id": batch_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def fetch_enriched_article_by_url(url: str) -> dict | None:
+    """`worker/arxiv_backfill.py` 专用：回补 workflow 里子 workflow 重新 enrich 完成后，
+    读回这一条最新结果（不按 batch_id 查，因为回补批次不参与常规聚合）。"""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT * FROM articles WHERE url = :url AND status = 'enriched'"), {"url": url}
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def list_arxiv_fulltext_backfill_candidates(cutoff_date: date) -> list[dict]:
+    """`worker/arxiv_backfill.py` 专用：查询"当前只抓到摘要页、全文还没渲染出来"且发布
+    时间在 `cutoff_date` 之后（14 天回补窗口内）的 arxiv 原文文档，附带回补时需要保持
+    不变的 doc_date/topic_slug/tags/related_zettel_id，以及重新 enrich 需要的原始（未
+    翻译）标题。doc_date 必须原样带回去覆盖 build_original_record 的重新计算结果——
+    如果重新 enrich 时 articles.published_at 恰好是 None（理论上可能，见 fetch.py 里
+    对畸形/缺失发布时间的兜底逻辑），build_original_record 会用 date.today() 兜底，
+    回补当天执行会把文档的 doc_date 悄悄改到回补当天，不是文档真实的发布日期。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    d.id AS doc_id,
+                    d.doc_date,
+                    d.frontmatter->>'source_url' AS url,
+                    d.frontmatter->>'topic_slug' AS topic_slug,
+                    d.frontmatter->>'related_zettel_id' AS related_zettel_id,
+                    a.fetched_title,
+                    a.published_at,
+                    COALESCE(
+                        (SELECT json_agg(t.tag) FROM tags t WHERE t.doc_id = d.id), '[]'::json
+                    ) AS tags
+                FROM documents d
+                JOIN articles a ON a.url = d.frontmatter->>'source_url'
+                WHERE d.doc_type = 'original'
+                  AND a.arxiv_fulltext_pending IS TRUE
+                  AND d.doc_date >= :cutoff_date
+                """
+            ),
+            {"cutoff_date": cutoff_date},
         ).mappings().all()
     return [dict(row) for row in rows]
 

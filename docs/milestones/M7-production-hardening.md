@@ -77,3 +77,25 @@
 **修复**：`aggregate_activity` 与 `write_activity` 合并为一个 Temporal activity——records（含全文正文）只在 `aggregate_activity` 内部产生和消费，`write_activity` 改为普通函数调用（不再单独注册为 Temporal activity），只把不含正文的小 summary（`{"written", "new_topics", "new_zettels"}`）返回给 workflow，彻底避免大 payload 跨 Temporal 序列化边界。
 
 **真实验证**：重建 `temporal-worker` 镜像并重启后，手动触发一次完整批次（`batch_id='2026-07-06-manual-verify'`，同时补跑了当天因故障缺失的数据）：`sources_attempted=14`/`sources_failed=0`/`fetched=1366`/`kept=95`/`enrich_failed=4`/`written=112`，workflow 从 `RUNNING` 正常流转到 `COMPLETED`；完整日志核查确认没有再出现 `ResourceExhausted`/gRPC 相关报错；`documents` 表按 `updated_at` 核实新增 91 original + 8 zettel + 11 topic + 1 daily + 1 digest = 112 条，与返回值完全对应。验证通过后恢复了排查期间暂停的 `ainews-pipeline-daily` Schedule。详见 `.claude/memory/decisions.md`「aggregate_activity/write_activity 合并修复 gRPC 4MB 消息上限」。
+
+### 观察期真实故障：translate_activity 超大论文超时 + 正文重复标题 + jiqizhixin 抓取污染，三处修复 + 两处新发现暂缓（2026-07-07）
+
+观察期第三天，巡检 09:00 自动批次（`kept=94`/`enrich_failed=5`/`written=103`）发现三类问题：① 5 篇 arxiv 全文论文（120/88/65/54 分块级别）`translate_activity` 三次重试均撞到 600s 超时（`ActivityError('Activity task timed out')`）；② 今天 89 篇 original 里至少 11 篇（约 12%）正文开头重复了一次标题；③ jiqizhixin 5 条只有 1 条入库，且内容是微信反爬验证页而非真实正文。
+
+**修复**：① `enrich.py::translate_activity` 分块等待改用 `as_completed` + `activity.heartbeat()`，`workflows.py` 对应加 `heartbeat_timeout=90s`、`start_to_close_timeout` 600s→1800s，靠心跳区分"真卡死"与"确实很慢"；② `_clean_fetched_markdown`（direct/jina/playwright 三通道共用清洗管线）新增通用"去掉正文开头重复 H1"，替代此前只覆盖 arxiv 全文页的专门处理（`_ARXIV_LEADING_H1_RE` 已删除）；③ `_fetch_jiqizhixin` 提取的微信直链补 `html.unescape()`（历史 9 篇里 4 篇受此 bug 影响）。为了让重跑的文章能正确补进 Daily/Topic/Digest，顺手修了 `aggregate_activity` 对同一 `batch_id` 重跑时 Topic 文档会重复追加的问题（`_build_topic_record` 幂等化）。
+
+**真实验证**：5 篇失败论文用心跳化后的新超时策略各自独立重跑 `EnrichArticleWorkflow`（新 `workflow_id`，沿用同一 `batch_id`），全部成功（`word_count` 4.3-7.3 万字符）；今天这篇 jiqizhixin 具体文章（`mid=2651042834`）用两条独立抓取路径（`_fetch_direct` + Jina Reader）重跑仍拿到反爬验证页，确认是微信对这篇内容本身的限制、不是我们的抓取实现问题，按范围只删除污染记录不强行补数据；对 `batch_id` 重新执行 `aggregate_activity` 后 `documents` 表核实 93 original + 12 topic + 1 daily + 1 digest = 107 条，逐一核对确认无同批次重复追加、无跨主题重复引用（修复过程中人工两次重跑 aggregate 触发了 4 篇文章的同批次聚类不一致，已按 `frontmatter.topic_slug` 手动核对清理）。
+
+**两处新发现、本次未处理**：`normalize_url_for_index`（`filter.py`）对 query-string 型 URL（如微信公众号）归一化会发生碰撞（丢弃 query string 后同域名同路径的不同文章塌缩成同一个跨日去重 key），影响面可能不止 jiqizhixin；同一篇文章跨天可能被 LLM 重新聚类到不同 topic 桶（`aggregate_activity` 每次聚类判断都是独立的 LLM 调用，不保证跨天稳定）。两者均为架构层面的问题，需要单独设计，未在本次改动范围内处理。详见 `.claude/memory/decisions.md`「2026-07-07 观察期真实故障：translate_activity 超大论文超时 + 正文重复标题 + jiqizhixin 抓取污染，三处修复 + 两处新发现暂缓」。
+
+### 观察期第四天：源治理 + 翻译降级三层兜底 + HuggingFace 转筛选层 + 新增独立 arxiv 全文回补 workflow（2026-07-08）
+
+观察期第四天，工作分四段推进，均已真实验证：
+
+**① 源治理**：`huggingface-daily-papers` 连续两天 400 报错，根因是 CST/EDT 时差导致查询"今天"命中还没有数据的日期，且既有日期回退循环有个死角（`raise_for_status()` 在第一次 400 就抛异常，回退到昨天那一步执行不到）——修复后真实验证拿到 40 条。`jiqizhixin`（历史 9 篇里 5 篇有数据质量问题，微信反爬限制确认非我方代码问题）与 `state-of-ai`（历史产出全是静态年度报告页、无持续新闻价值）两源停用（`reliability: dead`），新增 `marktechpost`/`venturebeat-ai`/`techcrunch-ai` 三个原生 RSS 替补源并真实验证跑通，活跃源数 14→13→16→15。
+
+**② 翻译降级三层兜底**：`translate_activity` 新增换模型兜底重试（主模型失败→`qwen3.6-flash`+加大 `max_tokens`），真实批次触发 9 次；进一步加了第三层安全边界切分再合并兜底（不切进表格/代码块，递归对半拆分直到 400 字符下限）。用 6 篇历史降级文章复查：3 篇经二层换模型修复，另 3 篇根因是 arxiv 全文当时还没渲染完（只抓到摘要），确认现有抓取逻辑本身无 bug、纯粹是时间差，重跑后 2 篇完全修复。同时补翻译了数据库里已知的 29 篇历史降级文章，途中因直接复用已译中文标题触发 `needs_translation()` 误判导致 29 篇全部被跳过翻译，发现后改用源页面真实原始标题重新走一遍，28 篇修复、1 篇（源 URL 已 404）用公开网络找到的替代地址补齐。
+
+**③ HuggingFace 转筛选层 + 新增独立 arxiv 全文回补 workflow**：核实 huggingface-daily-papers 从来没有全文、只是社区筛选信号（点赞数），且 arxiv 全文渲染延迟是 arxiv 自己后台异步批处理的固有特性（LaTeXML 渲染，实测 88% 在 3 天内完成）——据此把 HF 抓到的 entry 统一改标 `source_name=arxiv-api`（复用 arxiv 全文抓取/去重/分级逻辑），`articles` 表新增 `arxiv_fulltext_pending` 布尔列（migration 0007）全链路透传，新增独立的 `ArxivFulltextBackfillWorkflow` + 每日 09:00 Asia/Shanghai 独立 Schedule（`ainews-arxiv-fulltext-backfill-daily`），只查 14 天窗口内仍标记 pending 的候选、只更新 `documents.original` 正文，完全不碰 Topic/Daily/Digest。真实验证：模拟候选手动触发新 workflow 返回 `{"checked": 1, "ready": 1, "upgraded": 1}`，确认 Topic/Daily/Digest 的 `updated_at` 全程未变。当天晚些时候用真实数据核查发现一个部署时序缺口——新架构镜像中午才重建，晚于当天 09:00 的自动批次，导致该批次 10 篇 arxiv 论文漏打 pending 标记，已手动补标记修复，确认次日回补能正确捕捉到。
+
+**④ 代码审查 + 修复**：用 10 视角多角度审查当天全部改动，发现并修复 8 个真实问题（2 个正确性回归——分块翻译 CJK 复检循环在换模型/安全切分成功后仍无保护调用失败过的模型、arxiv 摘要页清洗顺序回归导致样板文字重新泄漏进正文；1 处数据丢失——HuggingFace 点赞信号从未被下游持久化，订正了此前的错误结论；其余为 KeyError 防御、重复抓取效率、SQL 双重数据源、Temporal fan-out 异常处理不一致等），详见 `.claude/memory/decisions.md`「2026-07-08 代码审查：修复今天新增代码的 8 个真实问题」。

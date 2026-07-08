@@ -109,16 +109,20 @@ def test_hf_paper_to_entry_builds_arxiv_abs_url():
             "upvotes": 42,
         }
     }
-    entry = _hf_paper_to_entry(item, source_name="huggingface-daily-papers")
+    entry = _hf_paper_to_entry(item)
     assert entry.url == "https://arxiv.org/abs/2607.01234"
     assert entry.published == date(2026, 7, 2)
     assert entry.low_confidence is False
     assert entry.extra["upvotes"] == 42
+    # 2026-07-08：HF 本身没有全文，只是社区筛选信号——entry.source_name 统一改标成
+    # arxiv-api，复用 arxiv 现有的全文抓取/去重/分级逻辑，见 decisions.md 的核查记录。
+    assert entry.source_name == "arxiv-api"
+    assert entry.extra["hf_recommended"] is True
 
 
 def test_hf_paper_to_entry_missing_id_is_low_confidence():
     item = {"paper": {"title": "No ID Paper", "summary": "summary"}}
-    entry = _hf_paper_to_entry(item, source_name="huggingface-daily-papers")
+    entry = _hf_paper_to_entry(item)
     assert entry.url == ""
     assert entry.low_confidence is True
 
