@@ -1,0 +1,35 @@
+---
+// AInews · Deep Dives 滑动懒加载片段端点
+export const prerender = false
+
+import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
+import { fetchDocumentSummariesByType } from '../../lib/db'
+import { DEEP_DIVES_PAGE_SIZE } from '../../lib/pagination'
+
+const pageParam = Number(Astro.url.searchParams.get('page') ?? '2')
+const page = Number.isFinite(pageParam) && pageParam >= 1 ? pageParam : 2
+const offset = (page - 1) * DEEP_DIVES_PAGE_SIZE
+
+const { rows, total } = await fetchDocumentSummariesByType('deep_dive', { limit: DEEP_DIVES_PAGE_SIZE, offset })
+const hasMore = offset + rows.length < total
+Astro.response.headers.set('X-Has-More', String(hasMore))
+Astro.response.headers.set('Cache-Control', 'no-store')
+---
+
+<div data-fragment>
+  {rows.map((row) => {
+    const windowStart = row.frontmatter.window_start as string | undefined
+    const windowEnd = row.frontmatter.window_end as string | undefined
+    const entryCount = (row.frontmatter.entry_count as number | null) ?? 0
+    const trendingCount = ((row.frontmatter.trending_topics as unknown[] | null) ?? []).length
+    return (
+      <IntelligenceCard
+        href={`/deep-dives/${row.id}/`}
+        eyebrow={windowStart && windowEnd ? `${windowStart} ~ ${windowEnd}` : row.doc_date ?? ''}
+        title={row.title ?? row.id}
+        metaLine={`${entryCount} 条原文 · ${trendingCount} 个热门话题`}
+        ai={true}
+      />
+    )
+  })}
+</div>

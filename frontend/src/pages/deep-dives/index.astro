@@ -1,25 +1,58 @@
 ---
-// AInews · Deep-Dives · v1 空态
+// AInews · Deep Dives 列表（M10，请求时查 Postgres doc_type='deep_dive'）
+// 每周一 09:00 Asia/Shanghai 由独立 Temporal Schedule 产出一篇，量级参照 Daily
+export const prerender = false
+
 import BaseLayout from '../../layouts/BaseLayout.astro'
 import HeroSection from '../../components/cards/HeroSection.astro'
-import EmptyState from '../../components/cards/EmptyState.astro'
+import IntelligenceCard from '../../components/cards/IntelligenceCard.astro'
+import { fetchDocumentSummariesByType, fetchMaxDocDate } from '../../lib/db'
+import { DEEP_DIVES_PAGE_SIZE } from '../../lib/pagination'
+
+const [{ rows, total }, maxUpdated] = await Promise.all([
+  fetchDocumentSummariesByType('deep_dive', { limit: DEEP_DIVES_PAGE_SIZE, offset: 0 }),
+  fetchMaxDocDate('deep_dive'),
+])
+const eyebrow = `${total} 期 · 更新至 ${maxUpdated ?? '—'}`
+const hasMore = rows.length < total
 ---
 
 <BaseLayout
-  title="Deep Dives · 深度专题"
-  description="AInews 深度专题 · 长文思考与多角度分析"
+  title="Deep Dives · 深度周报"
+  description="AInews 深度周报 · 跨周聚合热门话题趋势，附带一段整体叙事导语"
 >
   <HeroSection
-    eyebrow="筹备中 · 敬请期待"
-    title="深度专题"
-    subtitle="长文思考与多角度分析，暂未开始收录，可先看看每日简报或主题聚合"
+    eyebrow={eyebrow}
+    title="深度周报"
+    subtitle="每周一次，跨周聚合本周热门话题趋势，看一周内 AI 领域的整体动态"
   />
 
-  <EmptyState
-    icon="explore"
-    title="深度专题正在筹备"
-    description="这里将承载长文深度分析——周报、月报与主题综述。目前尚未开始收录，可先看看每日简报或主题聚合。"
-    ctaLabel="查看每日简报"
-    ctaHref="/daily/"
-  />
+  <div class="deep-dives-list" data-infinite-list data-endpoint="/deep-dives/more" data-page="2" data-mode="flat">
+    {rows.map((row) => {
+      const windowStart = row.frontmatter.window_start as string | undefined
+      const windowEnd = row.frontmatter.window_end as string | undefined
+      const entryCount = (row.frontmatter.entry_count as number | null) ?? 0
+      const trendingCount = ((row.frontmatter.trending_topics as unknown[] | null) ?? []).length
+      return (
+        <IntelligenceCard
+          href={`/deep-dives/${row.id}/`}
+          eyebrow={windowStart && windowEnd ? `${windowStart} ~ ${windowEnd}` : row.doc_date ?? ''}
+          title={row.title ?? row.id}
+          metaLine={`${entryCount} 条原文 · ${trendingCount} 个热门话题`}
+          ai={true}
+        />
+      )
+    })}
+    {hasMore && <div data-scroll-sentinel></div>}
+  </div>
 </BaseLayout>
+
+<script is:inline src="/infinite-scroll.js"></script>
+
+<style>
+  .deep-dives-list {
+    display: grid;
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+</style>

@@ -1,0 +1,105 @@
+---
+// AInews · Mermaid 客户端渲染（M10 Deep Dive 追加）
+// body_md 里的 ```mermaid 代码块经 Astro/Shiki 渲染后是 <pre data-language="mermaid">
+// <code>...</code></pre>（已用真实渲染管线验证过：rehype-sanitize 默认 schema 已经
+//放行 pre 的 data-language 属性，不需要改 markdown-render.ts 的 sanitize 白名单）。
+// SSR 站点没有浏览器 DOM 环境做服务端图形渲染，改在客户端把 <pre> 换成 mermaid.js
+// 生成的 SVG——只在引入这个组件的页面才会真正执行，不是全站默认行为。
+---
+
+<script>
+  import mermaid from 'mermaid'
+
+  // mermaid 默认主题的 8 个饼图色（pie1-8）彼此明度/饱和度接近，8 个热门话题挤在一起
+  // 时区分度很低；换一套高区分度的定性调色板（改自 Tableau 10，相邻色相/明度都拉开），
+  // 柱状图（xyChart.plotColorPalette）复用同一套保持视觉一致。
+  const CHART_PALETTE = [
+    '#4E79A7', '#F28E2B', '#E15759', '#76B7B2',
+    '#59A14F', '#EDC948', '#B07AA1', '#FF9DA7',
+  ]
+
+  function currentTheme(): 'light' | 'dark' {
+    return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
+  }
+
+  async function renderMermaidBlocks() {
+    const blocks = document.querySelectorAll<HTMLPreElement>(
+      'pre[data-language="mermaid"]:not([data-mermaid-rendered])',
+    )
+    if (blocks.length === 0) return
+
+    // 站内有深色模式切换（[data-theme="dark"]，见 theme-toggle-client.ts），mermaid 的
+    // 文字/线条/象限背景色要跟着走，否则深色模式下会出现深色文字铺在深色背景上看不清。
+    // 图表数据本身的高区分度调色板（CHART_PALETTE）在两种主题下都直接复用，不用切换——
+    // 这套颜色饱和度足够，在浅色和深色背景下对比度都够用。
+    const isDark = currentTheme() === 'dark'
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      securityLevel: 'strict',
+      themeVariables: {
+        darkMode: isDark,
+        background: isDark ? '#0f1320' : '#ffffff',
+        primaryColor: CHART_PALETTE[0],
+        primaryTextColor: isDark ? '#eef0ff' : '#131b2e',
+        primaryBorderColor: isDark ? '#2a2d42' : '#c3c5d9',
+        secondaryColor: CHART_PALETTE[1],
+        tertiaryColor: CHART_PALETTE[2],
+        lineColor: isDark ? '#8b8fa8' : '#737688',
+        textColor: isDark ? '#eef0ff' : '#131b2e',
+        pie1: CHART_PALETTE[0], pie2: CHART_PALETTE[1], pie3: CHART_PALETTE[2], pie4: CHART_PALETTE[3],
+        pie5: CHART_PALETTE[4], pie6: CHART_PALETTE[5], pie7: CHART_PALETTE[6], pie8: CHART_PALETTE[7],
+        pieOpacity: '1',
+        pieOuterStrokeWidth: '1px',
+        pieSectionTextColor: isDark ? '#131b2e' : '#ffffff',
+        xyChart: {
+          backgroundColor: 'transparent',
+          plotColorPalette: CHART_PALETTE.join(','),
+        },
+        quadrant1Fill: isDark ? '#2a1f1f' : '#fdedec',
+        quadrant2Fill: isDark ? '#2a2519' : '#fef5e7',
+        quadrant3Fill: isDark ? '#1a2530' : '#ebf5fb',
+        quadrant4Fill: isDark ? '#1a2a20' : '#eafaf1',
+        quadrantPointFill: CHART_PALETTE[0],
+        quadrantPointTextFill: isDark ? '#eef0ff' : '#131b2e',
+      },
+    })
+
+    let index = 0
+    for (const pre of Array.from(blocks)) {
+      pre.dataset.mermaidRendered = 'true'
+      const source = pre.querySelector('code')?.textContent ?? ''
+      if (!source.trim()) continue
+      try {
+        const { svg } = await mermaid.render(`mermaid-diagram-${Date.now()}-${index++}`, source)
+        const container = document.createElement('div')
+        container.className = 'mermaid-diagram'
+        container.innerHTML = svg
+        pre.replaceWith(container)
+      } catch (err) {
+        console.error('[mermaid]', err)
+      }
+    }
+  }
+
+  // 全站接了 ClientRouter，同一个 <script> 标签在切页后不会重新执行顶层代码，
+  // 必须监听 astro:page-load（首次加载 + 每次切页完成后都会触发），跟
+  // infinite-scroll.js 的既有模式一致。
+  document.addEventListener('astro:page-load', renderMermaidBlocks)
+</script>
+
+<style is:global>
+  .mermaid-diagram {
+    display: flex;
+    justify-content: center;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+    background: var(--surface-container-low);
+    border: 1px solid var(--color-lightgray);
+    border-radius: var(--radius-xl);
+    overflow-x: auto;
+  }
+  .mermaid-diagram svg {
+    max-width: 100%;
+  }
+</style>

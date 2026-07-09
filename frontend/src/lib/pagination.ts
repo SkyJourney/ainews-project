@@ -8,6 +8,7 @@ export const DIGEST_PAGE_SIZE = 15
 export const TOPICS_PAGE_SIZE = 30
 export const ZETTEL_PAGE_SIZE = 20 // 2 列 masonry，卡片中等高度
 export const ORIGINALS_PAGE_SIZE = 24 // 3 列杂志网格，增长最快、最先出现性能问题的页面
+export const DEEP_DIVES_PAGE_SIZE = 10 // 周报每周 1 篇，量级参照 DAILY_PAGE_SIZE，基本不会触发翻页
 
 // Topic 详情页：正文按日期区块懒加载（不是跨文档分页，是单篇文档内部按区块切分）。
 // Topic 是唯一无限期持续累积内容的文档类型，实测 46KB/9 区块渲染 56ms、合成 20 倍

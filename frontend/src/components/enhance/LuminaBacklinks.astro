@@ -16,8 +16,9 @@ interface Props {
 
 const { backlinks } = Astro.props
 
-// 分组：按 docType 归类，显示顺序 = Daily → Zettel → Original → Topic → Digest
-const ORDER: DocType[] = ['daily', 'zettel', 'original', 'topic', 'digest']
+// 分组：按 docType 归类，显示顺序 = Daily → Zettel → Original → Topic → Digest → Deep Dive
+// （Deep Dive 放最后，语义上是"最晚聚合"的一层，M10）
+const ORDER: DocType[] = ['daily', 'zettel', 'original', 'topic', 'digest', 'deep_dive']
 
 const bins = new Map<string, Backlink[]>()
 for (const bl of backlinks) {

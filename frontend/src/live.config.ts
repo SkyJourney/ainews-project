@@ -1,6 +1,5 @@
 // AInews · Live Content Collections 定义（M6，请求时查 Postgres）
-// 五类文档除 deep-dives（04-roadmap 五类文档不含这个类型，且该内容当前是空的，
-// 前端保留纯静态占位页，不接查询）外全部收拢到这里；content.config.ts +
+// 六类文档（含 M10 新增的 deep_dive 周报）全部收拢到这里；content.config.ts +
 // vault-loader.ts（build-time，旧 vault 数据源）已经完全没有页面引用，可以删除。
 
 import { defineLiveCollection } from 'astro:content'
@@ -31,4 +30,9 @@ const digest = defineLiveCollection({
   loader: postgresLiveLoader('digest'),
 })
 
-export const collections = { daily, topics, zettel, originals, digest }
+const deepDives = defineLiveCollection({
+  type: 'live',
+  loader: postgresLiveLoader('deep_dive'),
+})
+
+export const collections = { daily, topics, zettel, originals, digest, deepDives }

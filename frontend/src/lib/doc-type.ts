@@ -2,7 +2,7 @@
 // 替代旧版 slug-utils.ts 里"从 slug 命名规律推断类型"的启发式（M6 起 doc_type 是
 // Postgres 里的显式列，不需要再猜）
 
-export type DocType = 'daily' | 'topic' | 'zettel' | 'original' | 'digest'
+export type DocType = 'daily' | 'topic' | 'zettel' | 'original' | 'digest' | 'deep_dive'
 
 export const DOC_TYPE_SEGMENT: Record<DocType, string> = {
   daily: 'daily',
@@ -10,6 +10,7 @@ export const DOC_TYPE_SEGMENT: Record<DocType, string> = {
   zettel: 'zettel',
   original: 'originals',
   digest: 'digest',
+  deep_dive: 'deep-dives',
 }
 
 export const DOC_TYPE_LABEL: Record<DocType, string> = {
@@ -18,6 +19,7 @@ export const DOC_TYPE_LABEL: Record<DocType, string> = {
   zettel: '原子卡片',
   original: '原文归档',
   digest: '摘要速览',
+  deep_dive: '深度周报',
 }
 
 /** 生成文档详情页 URL；未知 doc_type 时退化为 originals（永远可靠的归档层） */

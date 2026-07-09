@@ -1,0 +1,76 @@
+---
+// AInews · Deep Dive 详情页 /deep-dives/{deep-dive-YYYY-MM-DD}/
+// 正文含 wikilink（回链 topic/original），走完整渲染管线 + LuminaBacklinks（M10）
+export const prerender = false
+
+import { getLiveEntry, render } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import HeroSection from '../../components/cards/HeroSection.astro'
+import ChipsRail from '../../components/cards/ChipsRail.astro'
+import LuminaBacklinks from '../../components/enhance/LuminaBacklinks.astro'
+import MermaidRenderer from '../../components/enhance/MermaidRenderer.astro'
+
+const { slug } = Astro.params
+const { entry, error } = await getLiveEntry('deepDives', slug!)
+if (error || !entry) {
+  return new Response(null, { status: 404, statusText: 'Not Found' })
+}
+const { Content } = await render(entry)
+
+const title = (entry.data.title as string | undefined) ?? entry.id
+const windowStart = entry.data.window_start as string | undefined
+const windowEnd = entry.data.window_end as string | undefined
+const entryCount = (entry.data.entry_count as number | null) ?? 0
+const trendingTopics = (entry.data.trending_topics as { slug: string; total_count: number; active_days: number }[] | null) ?? []
+const chips = trendingTopics.map((t) => ({ label: `${t.slug} · ${t.total_count}条/${t.active_days}天`, slug: t.slug }))
+---
+
+<BaseLayout
+  title={title}
+  description={`AInews 深度周报 · ${windowStart} ~ ${windowEnd} · 共 ${entryCount} 条原文`}
+>
+  <article class="deep-dive-detail">
+    <HeroSection
+      eyebrow={`Deep Dive · ${windowStart} ~ ${windowEnd}`}
+      title={title}
+      subtitle={`共 ${entryCount} 条原文 · ${trendingTopics.length} 个热门话题`}
+      large={true}
+    />
+
+    {chips.length > 0 && <ChipsRail chips={chips} />}
+
+    <div class="deep-dive-detail-layout">
+      <div class="deep-dive-detail-body lumina-reading-well">
+        <Content />
+      </div>
+
+      <aside class="deep-dive-detail-aside">
+        <LuminaBacklinks backlinks={entry.data.backlinks ?? []} />
+      </aside>
+    </div>
+  </article>
+</BaseLayout>
+
+<MermaidRenderer />
+
+<style>
+  .deep-dive-detail {
+    padding-block: 1rem 4rem;
+  }
+  .deep-dive-detail-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 3rem;
+    margin-top: 1rem;
+  }
+  @media (max-width: 900px) {
+    .deep-dive-detail-layout {
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+  }
+  .deep-dive-detail-body {
+    font-size: 1.05rem;
+    line-height: 1.75;
+  }
+</style>
