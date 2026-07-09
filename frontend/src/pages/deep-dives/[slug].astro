@@ -21,19 +21,30 @@ const title = (entry.data.title as string | undefined) ?? entry.id
 const windowStart = entry.data.window_start as string | undefined
 const windowEnd = entry.data.window_end as string | undefined
 const entryCount = (entry.data.entry_count as number | null) ?? 0
+// topic_slug 有值 = 专题月报（M11），无值 = 深度周报（M10）——两种形态复用同一个
+// doc_type='deep_dive'，详情页据此分别渲染 ChipsRail（周报=多个热门话题 chips，
+// 月报=单一专题徽章）与文案（见 M11 设计决策）
+const topicSlug = entry.data.topic_slug as string | undefined
 const trendingTopics = (entry.data.trending_topics as { slug: string; total_count: number; active_days: number }[] | null) ?? []
-const chips = trendingTopics.map((t) => ({ label: `${t.slug} · ${t.total_count}条/${t.active_days}天`, slug: t.slug }))
+const zettelCount = (entry.data.zettel_count as number | null) ?? 0
+const chips = topicSlug
+  ? [{ label: topicSlug, slug: topicSlug }]
+  : trendingTopics.map((t) => ({ label: `${t.slug} · ${t.total_count}条/${t.active_days}天`, slug: t.slug }))
+const reportKind = topicSlug ? '专题月报' : '深度周报'
+const subtitle = topicSlug
+  ? `共 ${entryCount} 条原文 · 引用 ${zettelCount} 条笔记`
+  : `共 ${entryCount} 条原文 · ${trendingTopics.length} 个热门话题`
 ---
 
 <BaseLayout
   title={title}
-  description={`AInews 深度周报 · ${windowStart} ~ ${windowEnd} · 共 ${entryCount} 条原文`}
+  description={`AInews ${reportKind} · ${windowStart} ~ ${windowEnd} · 共 ${entryCount} 条原文`}
 >
   <article class="deep-dive-detail">
     <HeroSection
-      eyebrow={`Deep Dive · ${windowStart} ~ ${windowEnd}`}
+      eyebrow={`${reportKind} · ${windowStart} ~ ${windowEnd}`}
       title={title}
-      subtitle={`共 ${entryCount} 条原文 · ${trendingTopics.length} 个热门话题`}
+      subtitle={subtitle}
       large={true}
     />
 

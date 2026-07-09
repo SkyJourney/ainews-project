@@ -21,13 +21,20 @@ Astro.response.headers.set('Cache-Control', 'no-store')
     const windowStart = row.frontmatter.window_start as string | undefined
     const windowEnd = row.frontmatter.window_end as string | undefined
     const entryCount = (row.frontmatter.entry_count as number | null) ?? 0
-    const trendingCount = ((row.frontmatter.trending_topics as unknown[] | null) ?? []).length
+    // topic_slug 有值 = 专题月报（M11），无值 = 深度周报（M10），两种形态复用同一个
+    // doc_type='deep_dive'——跟 index.astro 保持同一套区分逻辑
+    const topicSlug = row.frontmatter.topic_slug as string | undefined
+    const rangeLabel = windowStart && windowEnd ? `${windowStart} ~ ${windowEnd}` : row.doc_date ?? ''
+    const eyebrow = topicSlug ? `专题月报 · ${rangeLabel}` : `深度周报 · ${rangeLabel}`
+    const metaLine = topicSlug
+      ? `${entryCount} 条原文 · ${(row.frontmatter.zettel_count as number | null) ?? 0} 条笔记引用`
+      : `${entryCount} 条原文 · ${((row.frontmatter.trending_topics as unknown[] | null) ?? []).length} 个热门话题`
     return (
       <IntelligenceCard
         href={`/deep-dives/${row.id}/`}
-        eyebrow={windowStart && windowEnd ? `${windowStart} ~ ${windowEnd}` : row.doc_date ?? ''}
+        eyebrow={eyebrow}
         title={row.title ?? row.id}
-        metaLine={`${entryCount} 条原文 · ${trendingCount} 个热门话题`}
+        metaLine={metaLine}
         ai={true}
       />
     )
