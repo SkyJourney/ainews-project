@@ -280,6 +280,28 @@ def test_build_deep_dive_record_includes_bar_and_pie_but_not_quadrant_for_single
     assert "quadrantChart" not in record["body_md"]
 
 
+def test_build_deep_dive_record_skips_chart_without_stray_blank_when_lint_fails(mocker):
+    """柱状图 lint 判定失败（返回空字符串）时，正文里不应该出现 xychart-beta，且不留下
+    多余的空行——验证 charts 列表过滤空字符串这一步真的接入了。"""
+    mocker.patch.object(deep_dive, "_build_daily_volume_bar_chart", return_value="")
+    trending = [
+        {
+            "slug": "agents",
+            "total_count": 5,
+            "active_days": 3,
+            "representatives": [{"doc_id": "o1", "title": "t", "source_name": "s", "gist": "g"}],
+            "zettels": [],
+            "fulltext_ids": [],
+            "analysis": make_analysis(),
+        }
+    ]
+    daily_counts = [{"date": "2026-07-01", "count": 5}]
+    record = deep_dive._build_deep_dive_record(date(2026, 7, 1), date(2026, 7, 7), trending, 5, [], "导语", daily_counts)
+    assert "xychart-beta" not in record["body_md"]
+    assert "pie showData" in record["body_md"]
+    assert "\n\n\n\n" not in record["body_md"]
+
+
 def test_build_deep_dive_record_includes_all_three_charts_for_multiple_topics():
     trending = [
         {
@@ -882,6 +904,87 @@ def test_sanitize_mermaid_label_truncates_long_text():
     assert len(result) == 24
 
 
+def test_sanitize_mermaid_label_escapes_hash_to_avoid_entity_prefix():
+    """裸露的 # 会被 mermaid 当成 HTML 实体转义序列前缀（如 #35;），替换成全角＃规避。"""
+    assert deep_dive._sanitize_mermaid_label("发布了 #3 个版本") == "发布了 ＃3 个版本"
+
+
+def test_sanitize_mermaid_label_guards_reserved_word_end():
+    """`end`（大小写不敏感整词）是 flowchart 保留字，命中时追加空格打破整词匹配。"""
+    assert deep_dive._sanitize_mermaid_label("end") == "end "
+    assert deep_dive._sanitize_mermaid_label("End") == "End "
+    assert deep_dive._sanitize_mermaid_label("END") == "END "
+    # 只在整词精确匹配时才处理，不误伤包含 end 的正常文本
+    assert deep_dive._sanitize_mermaid_label("weekend") == "weekend"
+
+
+# ---------------------------------------------------------------------------
+# _lint_mermaid_block
+# ---------------------------------------------------------------------------
+
+def test_lint_mermaid_block_accepts_real_generated_charts():
+    """四种真实图表生成函数的输出都应该通过 lint（回归防护：不能让 lint 规则本身
+    误伤项目自己机械生成的合法图表）。"""
+    trending = [
+        {"slug": "agents", "total_count": 20, "active_days": 7, "representatives": []},
+        {"slug": "model-releases", "total_count": 10, "active_days": 2, "representatives": []},
+    ]
+    daily_counts = [{"date": "2026-07-01", "count": 10}, {"date": "2026-07-02", "count": 0}]
+    relationships = [
+        {"from_id": "z1", "from_title": "笔记一", "to_id": "z2", "to_title": "笔记二", "relation": "corroborates", "label": "A"},
+    ]
+    assert deep_dive._lint_mermaid_block(deep_dive._build_trend_pie_chart(trending))
+    assert deep_dive._lint_mermaid_block(deep_dive._build_daily_volume_bar_chart(daily_counts))
+    assert deep_dive._lint_mermaid_block(deep_dive._build_trend_quadrant_chart(trending))
+    assert deep_dive._lint_mermaid_block(deep_dive._build_relationship_chart(relationships))
+
+
+def test_lint_mermaid_block_rejects_missing_fence():
+    assert deep_dive._lint_mermaid_block('flowchart LR\n    A["x"]') is False
+
+
+def test_lint_mermaid_block_rejects_unknown_diagram_type():
+    assert deep_dive._lint_mermaid_block('```mermaid\nsequenceDiagram\n    A->>B: hi\n```') is False
+
+
+def test_lint_mermaid_block_rejects_unbalanced_brackets():
+    assert deep_dive._lint_mermaid_block('```mermaid\nflowchart LR\n    n0["缺右括号\n```') is False
+
+
+def test_lint_mermaid_block_rejects_unbalanced_quotes():
+    assert deep_dive._lint_mermaid_block('```mermaid\nflowchart LR\n    n0["缺右引号]\n```') is False
+
+
+def test_lint_mermaid_block_rejects_quadrant_bare_trailing_zero_float():
+    """quadrantChart 的 regression 断言：真实 mermaid 11.16.0 解析器无法处理 "1.0"
+    这种字面量（见 _format_quadrant_coord）。这条只对 quadrantChart 生效。"""
+    code = '```mermaid\nquadrantChart\n    title t\n    "x" : [1.0, 0.5]\n```'
+    assert deep_dive._lint_mermaid_block(code) is False
+
+
+def test_lint_mermaid_block_does_not_reject_trailing_zero_float_outside_quadrant():
+    """同样的 "4.0" 文本出现在 flowchart 标签里（比如版本号 GPT-4.0）应该正常通过，
+    这条 regression 断言只应该命中 quadrantChart 曾经真实踩过 bug 的图类型。"""
+    code = '```mermaid\nflowchart LR\n    n0["GPT-4.0 发布"]\n```'
+    assert deep_dive._lint_mermaid_block(code) is True
+
+
+def test_build_relationship_chart_drops_when_lint_fails(mocker):
+    """验证图表构建函数确实接入了 lint 兜底：lint 判定失败时返回空字符串，而不是把
+    格式错误的代码块写进正文。"""
+    mocker.patch.object(deep_dive, "_lint_mermaid_block", return_value=False)
+    relationships = [
+        {"from_id": "z1", "from_title": "笔记一", "to_id": "z2", "to_title": "笔记二", "relation": "corroborates", "label": "A"},
+    ]
+    assert deep_dive._build_relationship_chart(relationships) == ""
+
+
+def test_build_trend_pie_chart_drops_when_lint_fails(mocker):
+    mocker.patch.object(deep_dive, "_lint_mermaid_block", return_value=False)
+    trending = [{"slug": "agents", "total_count": 19, "active_days": 5, "representatives": []}]
+    assert deep_dive._build_trend_pie_chart(trending) == ""
+
+
 # ---------------------------------------------------------------------------
 # _previous_weekly_window / _previous_monthly_window
 # ---------------------------------------------------------------------------
@@ -1069,6 +1172,16 @@ def test_build_topic_deep_dive_record_includes_chart_with_topic_label_when_data_
     )
     assert "xychart-beta" in record["body_md"]
     assert "Agent · 本月每日产出量" in record["body_md"]
+
+
+def test_build_topic_deep_dive_record_omits_chart_when_lint_fails(mocker):
+    """柱状图 lint 判定失败时，正文里不应该出现 xychart-beta，也不留下多余空行。"""
+    mocker.patch.object(deep_dive, "_build_daily_volume_bar_chart", return_value="")
+    daily_counts = [{"date": "2026-07-01", "count": 3}]
+    record = deep_dive._build_topic_deep_dive_record(
+        "agents", date(2026, 7, 1), date(2026, 7, 31), 3, daily_counts, [], []
+    )
+    assert "xychart-beta" not in record["body_md"]
 
 
 def test_build_topic_deep_dive_record_includes_relationship_chart_when_present():

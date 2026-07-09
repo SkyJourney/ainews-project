@@ -89,6 +89,18 @@ CLUSTER_SKELETON_LIMIT = 200
 WEEKLY_TOPIC_FULLTEXT_LIMIT = 5
 _MERMAID_LABEL_UNSAFE_RE = re.compile(r'["|\[\]\n`]')
 
+# ---------------------------------------------------------------------------
+# mermaid 生成安全网（2026-07-09 追加，见 .claude/memory/decisions.md）：项目现有
+# mermaid 图表全部是"LLM 出结构化字段 → Python 机械拼语法"，从未让 LLM 直接产出
+# mermaid 代码文本——用户确认这个架构方向应该延续，但要求补强两层防御：① 转义规则
+# 之前没覆盖到的已知坑（# 实体转义前缀、end 保留字）；② 加一道结构性 lint，未通过
+# 时丢弃这张图而不是让格式错误的代码块混进正文破坏渲染。后端容器没有 Node/Chromium，
+# 引入 mermaid-cli 做运行时语法校验成本不成比例（这是低频周/月任务，不是高吞吐路径），
+# 所以 lint 是纯 Python 字符串结构检查，不是真实的 mermaid 语法解析器。
+# ---------------------------------------------------------------------------
+_MERMAID_DIAGRAM_TYPES = ("flowchart", "pie", "xychart-beta", "quadrantChart")
+_MERMAID_BARE_FLOAT_RE = re.compile(r"\b\d+\.0\b")
+
 # 深度内容总结的篇幅目标（2026-07-09 追加：用户反馈子主题分析仍偏"压缩摘要"，要求
 # "精读原文"后写出篇幅适度的深度报告正文，不是几句话）：周报保持原有简短基调（单份
 # 报告要覆盖最多 8 个热门 topic，每个都写长会导致周报臃肿到难以阅读）；月报因为是
@@ -228,7 +240,8 @@ def _build_trend_pie_chart(trending: list[dict]) -> str:
         label = TOPIC_LABEL.get(t["slug"], t["slug"])
         lines.append(f'    "{emoji} {label}" : {t["total_count"]}')
     lines.append('```')
-    return "\n".join(lines)
+    code = "\n".join(lines)
+    return code if _lint_mermaid_block(code) else ""
 
 
 def _build_daily_volume_bar_chart(daily_counts: list[dict], title: str = "本周每日产出量") -> str:
@@ -251,7 +264,8 @@ def _build_daily_volume_bar_chart(daily_counts: list[dict], title: str = "本周
         f'    bar [{bar_values}]',
         '```',
     ]
-    return "\n".join(lines)
+    code = "\n".join(lines)
+    return code if _lint_mermaid_block(code) else ""
 
 
 def _build_trend_quadrant_chart(trending: list[dict]) -> str:
@@ -281,7 +295,8 @@ def _build_trend_quadrant_chart(trending: list[dict]) -> str:
         label = TOPIC_LABEL.get(t["slug"], t["slug"])
         lines.append(f'    "{label}" : [{_format_quadrant_coord(x)}, {_format_quadrant_coord(y)}]')
     lines.append('```')
-    return "\n".join(lines)
+    code = "\n".join(lines)
+    return code if _lint_mermaid_block(code) else ""
 
 
 def _format_quadrant_coord(value: float) -> str:
@@ -315,9 +330,45 @@ def _sanitize_mermaid_label(text: str, max_length: int = 24) -> str:
     """LLM 生成的关系说明文本要拼进 mermaid flowchart 的边标签语法（`|"label"|`），
     双引号/竖线/方括号/换行会破坏语法结构——项目已经在 quadrantChart 坐标格式化上踩过
     一次真实的 mermaid 解析器 bug（见 _format_quadrant_coord），这里对自由文本做防御性
-    清洗，不假设 LLM 输出一定是"安全"的短语。"""
+    清洗，不假设 LLM 输出一定是"安全"的短语。2026-07-09 追加两条：mermaid 用 `#数字;`
+    表示 HTML 实体转义，裸露的 `#`（比如"发布了 #3 个版本"这类文本）会被解析器当成
+    转义序列前缀吞掉后面的字符，替换成全角 ＃ 规避（视觉近似，不影响可读性，比转成
+    HTML 实体更简单可靠）；`end`（大小写不敏感整词）是 flowchart 保留字，独立成一个
+    标签时会破坏语法，命中时追加一个空格打破整词匹配。"""
     cleaned = _MERMAID_LABEL_UNSAFE_RE.sub("", text).strip()
+    cleaned = cleaned.replace("#", "＃")
+    if cleaned.lower() == "end":
+        cleaned = cleaned + " "
     return cleaned[:max_length] if len(cleaned) > max_length else cleaned
+
+
+def _lint_mermaid_block(code: str) -> bool:
+    """对生成出来的 mermaid 代码块做结构性校验（纯字符串检查，不是真实的 mermaid
+    语法解析器——原因见上方"mermaid 生成安全网"注释）。校验项：① ```mermaid/```
+    围栏完整；② 声明的图类型是项目已知支持的四种之一；③ 方括号/圆括号/双引号都成对
+    出现；④ quadrantChart 专属的 regression 断言——不含形如 "3.0" 的浮点数字面量
+    （见 _format_quadrant_coord 的真实解析器 bug 说明），只在 quadrantChart 上检查，
+    不对其他图类型生效，避免误伤 flowchart 标签里合法出现的"GPT-4.0"这类文本。
+    校验不通过时，调用方应该丢弃这张图而不是把格式错误的代码块写进正文——图表是
+    正文的锦上添花，少一张图不影响文档可读，但一段破损的 mermaid 代码块会让整个
+    详情页的 markdown 渲染出问题。
+    """
+    lines = code.strip().split("\n")
+    if len(lines) < 3 or lines[0] != "```mermaid" or lines[-1] != "```":
+        return False
+    diagram_type = lines[1].strip()
+    if not diagram_type.startswith(_MERMAID_DIAGRAM_TYPES):
+        return False
+    body = "\n".join(lines[1:-1])
+    if body.count("[") != body.count("]"):
+        return False
+    if body.count("(") != body.count(")"):
+        return False
+    if body.count('"') % 2 != 0:
+        return False
+    if diagram_type.startswith("quadrantChart") and _MERMAID_BARE_FLOAT_RE.search(body):
+        return False
+    return True
 
 
 def _build_relationship_chart(relationships: list[dict]) -> str:
@@ -328,7 +379,11 @@ def _build_relationship_chart(relationships: list[dict]) -> str:
     实线箭头，conflicts 用红色虚线箭头区分视觉语义。节点 id 用位置索引起别名（doc_id
     本身含连字符，直接当 mermaid 节点 id 会被词法分析器当成箭头语法的一部分），节点
     标签里放文章标题（不是 doc_id 字符串）——标题比 doc_id 更有信息量，读者一眼就能
-    看懂这个节点是哪篇文章，不需要去猜 doc_id 对应什么内容。"""
+    看懂这个节点是哪篇文章，不需要去猜 doc_id 对应什么内容。节点/边标签都经过
+    _sanitize_mermaid_label 清洗，但文章标题是不受控的自由文本（不像 topic slug
+    这类内部字典值），返回前额外过一遍 _lint_mermaid_block 兜底，未通过时返回空
+    字符串——调用方（_render_analysis_dimensions）已经有 `if relationship_chart:`
+    判断，空字符串会被当成"没有可视化内容"正常跳过，不需要调用方额外处理。"""
     if not relationships:
         return ""
     node_ids: dict[str, str] = {}
@@ -348,7 +403,8 @@ def _build_relationship_chart(relationships: list[dict]) -> str:
         else:
             lines.append(f'    {src} -.->|"⚡ {label}"| {dst}')
     lines.append("```")
-    return "\n".join(lines)
+    code = "\n".join(lines)
+    return code if _lint_mermaid_block(code) else ""
 
 
 def _render_analysis_dimensions(analysis: dict) -> str:
@@ -426,6 +482,10 @@ def _build_deep_dive_record(
         charts.append(_build_trend_pie_chart(trending))
     if len(trending) >= 2:
         charts.append(_build_trend_quadrant_chart(trending))
+    # 每个 _build_*_chart 返回前都自带 _lint_mermaid_block 兜底，未通过校验时返回空
+    # 字符串（正常情况下不会发生，这里只是防止某张图万一没通过校验时在正文里留下
+    # 一段多余的空行）——过滤掉空字符串，不是过滤掉某个"图表位置"。
+    charts = [c for c in charts if c]
     charts_section = ("\n\n".join(charts) + "\n\n") if charts else ""
     stats_section = "## 本周数据统计\n\n" + "\n".join(
         [
@@ -737,7 +797,9 @@ def _build_topic_deep_dive_record(
 
     charts_section = ""
     if daily_counts and sum(d["count"] for d in daily_counts) > 0:
-        charts_section = _build_daily_volume_bar_chart(daily_counts, title=f"{label} · 本月每日产出量") + "\n\n"
+        bar_chart = _build_daily_volume_bar_chart(daily_counts, title=f"{label} · 本月每日产出量")
+        if bar_chart:
+            charts_section = bar_chart + "\n\n"
 
     stats_section = "## 本月数据统计\n\n" + "\n".join(
         [
