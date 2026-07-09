@@ -26,6 +26,7 @@ from worker.arxiv_backfill import (
     list_arxiv_fulltext_backfill_candidates_activity,
     refresh_original_document_activity,
 )
+from worker.deep_dive import compute_deep_dive_trends_activity, generate_deep_dive_activity
 from worker.enrich import (
     check_arxiv_fulltext_activity,
     fetch_original_activity,
@@ -42,7 +43,12 @@ from worker.fetch import (
 )
 from worker.filter import filter_activity
 from worker.schemas import PipelineParams
-from worker.workflows import AInewsPipelineWorkflow, ArxivFulltextBackfillWorkflow, EnrichArticleWorkflow
+from worker.workflows import (
+    AInewsPipelineWorkflow,
+    ArxivFulltextBackfillWorkflow,
+    DeepDiveWorkflow,
+    EnrichArticleWorkflow,
+)
 
 # write_activity（worker/write.py）从 2026-07-06 起不再单独注册为 Temporal activity——
 # aggregate_activity 内部直接调用它（普通函数调用，见 aggregate.py 顶部说明），不需要
@@ -53,6 +59,7 @@ TASK_QUEUE = "ainews-task-queue"
 MAX_ACTIVITY_WORKERS = 20
 PIPELINE_SCHEDULE_ID = "ainews-pipeline-daily"
 ARXIV_BACKFILL_SCHEDULE_ID = "ainews-arxiv-fulltext-backfill-daily"
+DEEP_DIVE_SCHEDULE_ID = "ainews-deep-dive-weekly"
 
 
 async def ensure_pipeline_schedule(client: Client) -> None:
@@ -101,6 +108,30 @@ async def ensure_arxiv_fulltext_backfill_schedule(client: Client) -> None:
         pass
 
 
+async def ensure_deep_dive_schedule(client: Client) -> None:
+    """幂等确保 Deep Dive 周报的每周调度存在（M10，2026-07-09 新增：完全独立的 workflow/
+    schedule，只读 original/digest、只新增一条 deep_dive 记录，不碰主流水线或 arxiv 回补，
+    见 .claude/memory/decisions.md）。cron 定在每周一 09:00 Asia/Shanghai，跟另外两个
+    Schedule 同一触发时间点但互不阻塞。"""
+    try:
+        await client.create_schedule(
+            DEEP_DIVE_SCHEDULE_ID,
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    DeepDiveWorkflow.run,
+                    id=f"{DEEP_DIVE_SCHEDULE_ID}-run",
+                    task_queue=TASK_QUEUE,
+                ),
+                spec=ScheduleSpec(
+                    cron_expressions=["0 9 * * 1"],
+                    time_zone_name="Asia/Shanghai",
+                ),
+            ),
+        )
+    except ScheduleAlreadyRunningError:
+        pass
+
+
 async def main() -> None:
     # 此前完全没有配置 logging，activity.logger/workflow.logger 的调用（含 enrich.py 的
     # [chunk_diag] 诊断日志）和 Temporal SDK 自身的内部日志都被静默丢弃，`docker logs`
@@ -110,6 +141,7 @@ async def main() -> None:
     client = await Client.connect(TEMPORAL_HOST, data_converter=pydantic_data_converter)
     await ensure_pipeline_schedule(client)
     await ensure_arxiv_fulltext_backfill_schedule(client)
+    await ensure_deep_dive_schedule(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
@@ -117,6 +149,7 @@ async def main() -> None:
             AInewsPipelineWorkflow,
             EnrichArticleWorkflow,
             ArxivFulltextBackfillWorkflow,
+            DeepDiveWorkflow,
         ],
         activities=[
             preflight_activity,
@@ -133,6 +166,8 @@ async def main() -> None:
             check_arxiv_fulltext_activity,
             list_arxiv_fulltext_backfill_candidates_activity,
             refresh_original_document_activity,
+            compute_deep_dive_trends_activity,
+            generate_deep_dive_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=MAX_ACTIVITY_WORKERS),
         max_concurrent_activities=MAX_ACTIVITY_WORKERS,

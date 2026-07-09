@@ -12,6 +12,7 @@ with workflow.unsafe.imports_passed_through():
         list_arxiv_fulltext_backfill_candidates_activity,
         refresh_original_document_activity,
     )
+    from worker.deep_dive import compute_deep_dive_trends_activity, generate_deep_dive_activity
     from worker.enrich import (
         check_arxiv_fulltext_activity,
         fetch_original_activity,
@@ -355,3 +356,35 @@ class ArxivFulltextBackfillWorkflow:
             upgraded += 1
 
         return {"checked": len(candidates), "ready": len(ready), "upgraded": upgraded}
+
+
+@workflow.defn
+class DeepDiveWorkflow:
+    """每周独立调度（周一 09:00 Asia/Shanghai，见 worker.py::ensure_deep_dive_schedule），
+    对过去一周的内容做二次聚合，产出一条 `documents.doc_type='deep_dive'` 记录（M10，
+    2026-07-09 新增，见 .claude/memory/decisions.md）。
+
+    比 ArxivFulltextBackfillWorkflow 更彻底的"完全解耦"——只读 original/digest，不改写
+    任何既有 Topic/Daily/Digest/Original/Zettel 文档，只新增这一条记录。
+    """
+
+    @workflow.run
+    async def run(self) -> dict:
+        default_retry = RetryPolicy(maximum_attempts=3)
+        # workflow 代码内必须用确定性时间源，date.today() 只能留在 activity 内部——
+        # 沿用 AInewsPipelineWorkflow 用 start_time 保证 replay 确定性的既定模式。
+        # 09:00 Asia/Shanghai = 01:00 UTC，.date() 直接取不会跨日翻转。
+        window_end = workflow.info().start_time.date() - timedelta(days=1)
+
+        trends = await workflow.execute_activity(
+            compute_deep_dive_trends_activity,
+            window_end,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=default_retry,
+        )
+        return await workflow.execute_activity(
+            generate_deep_dive_activity,
+            trends,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=default_retry,
+        )

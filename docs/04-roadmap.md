@@ -225,10 +225,10 @@ M1 独立验收，前一个不达标不进入下一个；**M2-M4 从路线图调
 ### M9 — 向量化 / RAG 扩展（可选延伸，同样延后）
 见 [03-architecture-proposal.md §8](./03-architecture-proposal.md#8-未来扩展向量化--自建-rag)。不新增数据库，复用同一 Postgres 实例的 `pgvector` 扩展；embedding 模型选型待独立调研。
 
-### M10 — Deep Dive：跨天聚合深度解读（延后，旧系统从未实现）
+### M10 — Deep Dive：跨天聚合深度解读（已完成，旧系统从未实现）
 **背景**：旧系统设计过"Deep Dive"（`40-Deep-Dives/`）——对 Digest 层做跨天/跨周二次聚合，识别跨日延续主题/热门 topic 趋势线。**核实这个功能在旧系统里从未真正实现过**（目录自建库以来只有空 `.gitkeep`，无对应 agent，前端是"筹备中"空态），不是"已验证规则待迁移"，是净新设计。
-**触发条件**：新系统 `documents` 表 `doc_type='digest'` 积累足够天数历史后才启动（沿用旧系统"≥7 天"门槛作参考起点；核实时点 2026-07-05 新系统只有 1 天 Digest 历史）。
-**范围（到时候再细化）**：详见 [`docs/milestones/M10-deep-dive.md`](./milestones/M10-deep-dive.md)。
+**触发条件（已达成）**：新系统 `documents` 表 `doc_type='digest'` 积累足够天数历史（沿用旧系统"≥7 天"门槛作参考起点）。2026-07-09 核查已有 12 天连续历史，正式启动实现。
+**实现**：独立 Temporal Schedule（每周一 09:00 Asia/Shanghai），机械统计"热门 topic"趋势（不重新聚类，复用既有 topic_slug）+ 1 次 LLM 调用生成周叙事导语，新增独立 `doc_type='deep_dive'`，完全只读输入 + 单条新增输出，不改写任何既有文档。详见 [`docs/milestones/M10-deep-dive.md`](./milestones/M10-deep-dive.md)。
 
 ---
 

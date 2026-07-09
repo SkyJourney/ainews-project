@@ -316,6 +316,52 @@ def document_id_exists(doc_id: str) -> bool:
     return row is not None
 
 
+def deep_dive_list_original_documents_in_window(window_start: date, window_end: date) -> list[dict]:
+    """`worker/deep_dive.py` 专用：取窗口内全部原文归档的 topic_slug 分布明细，供纯 Python
+    侧机械聚合"热门 topic"统计（M10：不重新调用聚类 LLM，只统计既有分类结果）。只做原始行
+    读取，不在 SQL 里 GROUP BY——聚合判断这类跨行逻辑照本文件既有分工留给调用方（对齐
+    aggregate.py 里 `_compute_daily_stats` 等统计全部在 Python 侧完成的写法）。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    id AS doc_id,
+                    doc_date,
+                    title,
+                    frontmatter->>'topic_slug' AS topic_slug,
+                    frontmatter->>'source_name' AS source_name,
+                    frontmatter->>'gist' AS gist
+                FROM documents
+                WHERE doc_type = 'original' AND doc_date BETWEEN :window_start AND :window_end
+                """
+            ),
+            {"window_start": window_start, "window_end": window_end},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def deep_dive_list_digest_documents_in_window(window_start: date, window_end: date) -> list[dict]:
+    """`worker/deep_dive.py` 专用：取窗口内逐日 Digest 原文，供 LLM 生成周叙事导语时当
+    素材（原样使用 body_md，不重新解析 blurb 结构）。"""
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id AS doc_id, doc_date, body_md
+                FROM documents
+                WHERE doc_type = 'digest' AND doc_date BETWEEN :window_start AND :window_end
+                ORDER BY doc_date
+                """
+            ),
+            {"window_start": window_start, "window_end": window_end},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def filter_lookup_url_index(normalized_url: str) -> dict | None:
     """filter_activity 专用：查询归一化 URL 是否已在跨日索引里（04 §2.3）。"""
     engine = get_engine()

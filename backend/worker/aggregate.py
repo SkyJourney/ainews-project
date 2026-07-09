@@ -85,7 +85,9 @@ TOPIC_LABEL = {
 }
 
 
-def _topic_heading(slug: str) -> str:
+def topic_heading(slug: str) -> str:
+    """topic 小标题渲染（emoji+中文名+wikilink），跨模块公开——`worker/deep_dive.py`
+    复用同一套映射保持视觉一致，不要各自维护一份。"""
     emoji = TOPIC_EMOJI.get(slug, "📌")
     label = TOPIC_LABEL.get(slug, _humanize_slug(slug))
     return f"## {emoji} {label} [[{slug}]]"
@@ -546,7 +548,7 @@ def _build_daily_record(
         groups.setdefault(ctx["topic_slug"], []).append(_render_daily_entry_line(article, ctx))
 
     topic_sections = "\n\n".join(
-        f"{_topic_heading(slug)}\n\n" + "\n".join(groups[slug]) for slug in sorted(groups)
+        f"{topic_heading(slug)}\n\n" + "\n".join(groups[slug]) for slug in sorted(groups)
     )
 
     stats = _compute_daily_stats(articles, decisions, per_article_ctx)
@@ -560,7 +562,7 @@ def _build_daily_record(
         + stats_section + "\n"
     )
 
-    # 主题小标题现在带 [[slug]] wikilink（见 _topic_heading），一并计入 link_targets，
+    # 主题小标题现在带 [[slug]] wikilink（见 topic_heading），一并计入 link_targets，
     # 这样 Topic 详情页的反链才能看到"被哪些 Daily 引用过"。
     link_targets = [ctx["zettel_id"] or ctx["original_id"] for ctx in per_article_ctx.values()]
     link_targets.extend(sorted(groups))
@@ -593,6 +595,15 @@ def _build_daily_record(
 # Stage E：Digest 文档写作（独立消费本批次结构化数据，五项自检硬约束）
 # ---------------------------------------------------------------------------
 
+def _balance_bold_markers(text: str) -> str:
+    """gist 现在可能含 `**加粗**` 标记（04 §2.4，`gist_activity` 新增指令），截断点如果
+    刚好落在一对标记中间，会留下奇数个 `**`——渲染成 Markdown 时不会加粗，而是显示成
+    裸露的星号字符。奇数个 `**` 说明有一处未闭合，砍掉最后这个不完整的加粗片段。"""
+    if text.count("**") % 2 == 1:
+        text = text.rsplit("**", 1)[0]
+    return text
+
+
 def _truncate_blurb(text: str, max_chars: int = _DIGEST_BLURB_MAX_CHARS) -> str:
     """自检⑤的机械落地：硬性字符上限，不靠 LLM 自估长度。优先在最后一个句末标点处截断，
     避免半句话戛然而止；找不到标点就硬截断并加省略号。
@@ -603,8 +614,8 @@ def _truncate_blurb(text: str, max_chars: int = _DIGEST_BLURB_MAX_CHARS) -> str:
     for punct in ("。", "！", "？", "；"):
         idx = truncated.rfind(punct)
         if idx > 0:
-            return truncated[: idx + 1]
-    return truncated.rstrip() + "…"
+            return _balance_bold_markers(truncated[: idx + 1])
+    return _balance_bold_markers(truncated.rstrip()) + "…"
 
 
 def _build_digest_entries(articles: list[dict]) -> list[dict]:

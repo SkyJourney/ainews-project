@@ -1173,10 +1173,18 @@ def translate_activity(title: str, body_md: str) -> dict:
 
 @activity.defn
 def gist_activity(title: str, body_md: str) -> str:
-    """一段话摘要，基于保证是中文的标题+正文生成。"""
+    """一段话摘要，基于保证是中文的标题+正文生成。gist 是 Daily TL;DR/Daily 主题条目/
+    Digest blurb/Deep Dive 代表文章行共用的唯一摘要来源（04 §2.5），加粗指令只需要在
+    这一处生成时给一次，就能让重点在全部下游消费点上生效，不需要各自单独处理。"""
     result = call_structured(
         model=GIST_MODEL,
-        system_prompt="你是新闻摘要助手，用一段中文话（80-150字）概括这篇文章讲了什么，不要逐段复述细节。",
+        system_prompt=(
+            "你是新闻摘要助手，用一段中文话（80-150字）概括这篇文章讲了什么，不要逐段复述细节。"
+            "每条摘要都必须用 Markdown **加粗** 标出 2-4 处最关键的信息——可以是关键词/短语"
+            "（核心产品名/机构名/关键数字），也可以是一句不超过15字的核心结论/发现（如"
+            "\"预测误差降低30%\"），目的是让读者快速扫描时一眼抓到重点；但不要整句话全部加粗，"
+            "不要为了凑数而加粗无关紧要的内容，也不要为了加粗而生造摘要之外的内容。"
+        ),
         user_content=f"{title}\n\n{body_md}",
         response_model=ArticleGist,
     )

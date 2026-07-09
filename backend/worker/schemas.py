@@ -101,7 +101,11 @@ class ChunkTranslation(BaseModel):
 class ArticleGist(BaseModel):
     """一段话摘要 tool schema。"""
 
-    gist: str = Field(description="用一段中文话概括这篇文章讲了什么，供聚合/展示阶段使用")
+    gist: str = Field(
+        description="用一段中文话概括这篇文章讲了什么，供聚合/展示阶段使用；"
+        "用 Markdown **加粗** 标出 2-4 处关键词/短语或不超过15字的核心结论短句，"
+        "方便快速扫描抓重点，不整句加粗、不生造内容"
+    )
 
 
 class TranslationCompletenessReview(BaseModel):
@@ -177,4 +181,16 @@ class ArticleMetadata(BaseModel):
     novelty_keywords: list[str] = Field(
         description="辅助新颖度判断的关键词或短语（如'首次提出'、'突破性'、'渐进式改进'），"
         "只描述这篇文章本身呈现的信号，不要判断是否与其他文章重复"
+    )
+
+
+class DeepDiveIntro(BaseModel):
+    """Deep Dive 周报导语 tool schema（M10）：唯一一次 LLM 调用，只生成叙事文本——"哪个
+    topic 算热门"是机械规则算好后传入的既定事实，这里不做二次判断，也不能编造给定素材
+    之外的事实。"""
+
+    intro: str = Field(
+        description="一段150-300字的中文导语，基于给定的本周热门话题统计与文章素材，"
+        "概括本周AI领域整体动态与延续性趋势，只能引用素材中出现的事实，不能编造；"
+        "用 Markdown **加粗** 标出 2-4 处最核心的关键词/短语或核心结论短句，方便快速扫描"
     )

@@ -1,31 +1,75 @@
-# M10 — Deep Dive（跨天聚合深度解读，明确延后）
+# M10 — Deep Dive（跨天聚合深度解读）
 
-> 前置依赖：`documents` 表 `doc_type='digest'` 积累足够天数的历史（见下方"触发条件"）
-> 状态：延后
 > 关联文档：[04-roadmap.md](../04-roadmap.md) §4 M10；旧系统设计参考：`/Volumes/Projects/AInews` 的 `40-Deep-Dives/`、`SCHEMA.md`、`.claude/skills/ai-news/references/vault-schema.md`
+> 状态：已完成（2026-07-09）
+> 决策记录：`.claude/memory/decisions.md`「M10：Deep Dive 实现落地」
 
 ## 背景
 
-旧系统设计过"Deep Dive"（`40-Deep-Dives/`）——对 Digest 层做跨天/跨周二次聚合，识别"跨日延续主题、热门 topic 趋势线"，产出周报/月报形态的第五种内容类型。**这个功能在旧系统里从未真正实现过**：目录自建库以来只有一个空 `.gitkeep`，`git log` 无任何改动记录；对应的 `news-weekly-digester` subagent 从未创建；前端页面是"筹备中"空态。旧系统设计文档写的触发门槛是"**积累 ≥7 天 `30-Digests/` 历史**"——核实旧系统 `30-Digests/` 实际已有 8 天数据，说明当初卡住的不是数据不够，是功能本身没写完。
+旧系统设计过"Deep Dive"（`40-Deep-Dives/`）——对 Digest 层做跨天/跨周二次聚合，识别"跨日延续主题、热门 topic 趋势线"，产出周报/月报形态的第五种内容类型。**这个功能在旧系统里从未真正实现过**：目录自建库以来只有一个空 `.gitkeep`，`git log` 无任何改动记录；对应的 `news-weekly-digester` subagent 从未创建；前端页面是"筹备中"空态。旧系统设计文档写的触发门槛是"**积累 ≥7 天 `30-Digests/` 历史**"。
 
-M7 生产化收尾讨论时用户提出"这个后续做成独立 Temporal 工作流是否合适"，确认这是一个值得追踪但尚不能开工的待办，故新增本里程碑文件占位，避免下次会话遗忘。
+M7 生产化收尾讨论时用户提出"这个后续做成独立 Temporal 工作流是否合适"，确认这是一个值得追踪但尚不能开工的待办，先新增本里程碑文件占位。2026-07-09 核查数据库确认 `documents` 表 `doc_type='digest'` 已积累 12 天连续历史（2026-06-28 ~ 2026-07-09，含 M8 迁移历史数据 + 新系统自身产出），远超门槛，用户提出"Deep Dive 的特性更适合跑一个周任务"，正式启动本里程碑。走完整设计确认流程（Plan Mode + Mermaid 架构图 + 用户显式批准）后分 4 步实现。
 
-## 触发条件
+## 触发条件（已达成）
 
-**新系统 `documents` 表里 `doc_type='digest'` 积累足够天数历史后才启动**（沿用旧系统"≥7 天"这个设计门槛作为参考起点，实际数字到时候可以重新评估）。核实时点（2026-07-05）新系统只有 **1 天** Digest 历史（`digest-2026-07-05`），距离门槛还早。
+新系统 `documents` 表 `doc_type='digest'` 积累足够天数历史（沿用旧系统"≥7 天"门槛作参考起点）。2026-07-09 核查时已有 12 天连续历史，门槛达成，正式启动实现。
 
-## 范围（到时候再细化，当前只占位）
+## 设计与实现
 
-- 对 `documents WHERE doc_type='digest'` 做跨天/跨周二次聚合，不是重新解析 `articles`/cluster 原始数据
-- 识别"跨日延续主题、热门 topic 趋势线"，产出新的文档类型（沿用 `digest` 扩展字段，还是新增独立 `doc_type` 如 `deep_dive`，留到设计阶段决定）
-- 触发方式可以自然复用 M7 刚建立的 Temporal Schedule 模式（`ensure_pipeline_schedule` 的姊妹实现，新增一个周/月粒度的 Schedule，action 指向新的 workflow）
+**这是 M0-M9 里第一个"旧系统没有可迁移先例"的里程碑**——不参照旧系统的任何"已验证规则"（旧系统这个功能从未跑通过），是净新设计。完整设计对齐见 `.claude/memory/decisions.md`，摘要如下：
 
-## 不做（当前阶段）
+- **触发方式**：独立 Temporal Schedule `ainews-deep-dive-weekly`（`worker/worker.py::ensure_deep_dive_schedule`，每周一 09:00 Asia/Shanghai），跟主流水线、arxiv 全文回补同一时间点但完全互不阻塞。
+- **数据聚合规则（机械统计，不重新聚类）**：窗口为触发日前 7 天（`window_end` = 触发日前一天，`window_start = window_end - 6 天`）；查询 `documents WHERE doc_type='original'` 在窗口内按既有 `topic_slug` 分组（**不重新调用聚类 LLM**，直接复用每篇文章 aggregate 阶段已判定的分类——"跨文章判断只能发生在 aggregate 阶段"这条项目铁律的自然延伸）；"热门 topic"入选规则是机械双门槛 `total_count >= 3 且 active_days >= 2`，按 `total_count` 降序取前 8 个，`uncategorized` 溢出桶不参与评选；命中 0 个仍正常产出文档（机械兜底文案，不跳过整周）。
+- **LLM 使用边界**：唯一一次 LLM 调用只生成一段周叙事导语（新增 `DeepDiveIntro` tool schema），不参与"哪个 topic 算热门"的判断，只能引用给定素材（热门 topic 统计 + 代表文章 gist + 逐日 Digest 原文）中的事实。
+- **输出**：新增独立 `doc_type='deep_dive'`（`documents.doc_type` 是无约束 TEXT 列，不需要 migration），`doc_id` 格式 `deep-dive-{window_end}`，`frontmatter` 含结构化 `trending_topics`/`entry_count`/`source_digest_ids`，正文含 wikilink 回 topic/original。完全只读输入 + 单条新增输出，不改写任何既有 Topic/Daily/Digest/Original/Zettel 文档——比 arxiv 全文回补更彻底的"完全解耦"。
 
-- 不参照旧系统的任何"已验证规则"——因为旧系统这个功能从未跑通过，没有可迁移的业务逻辑，是净新设计，不是迁移
-- 不在数据门槛达成前预研聚合算法细节，避免像 M8 一样分散注意力
+## 落地方式
 
-## 备注 / 风险
+**Step 1（后端核心）**：`backend/worker/db.py` 新增 `deep_dive_list_original_documents_in_window`/`deep_dive_list_digest_documents_in_window`（延续 `filter_*`/`aggregate_*` 的按消费模块前缀命名惯例）；`backend/worker/schemas.py` 新增 `DeepDiveIntro`；`backend/worker/aggregate.py` 的 `_topic_heading` 改名为跨模块公开的 `topic_heading`（供 deep_dive.py 复用同一套 emoji/中文名映射，视觉一致）；新建 `backend/worker/deep_dive.py`（趋势统计 `compute_deep_dive_trends_activity` + 导语生成/落库 `generate_deep_dive_activity` 两个 activity，`uncategorized` 溢出桶排除在趋势评选外）；`backend/worker/workflows.py` 新增 `DeepDiveWorkflow`（两步 activity 串联，`window_end` 用 `workflow.info().start_time` 保证 replay 确定性）；`backend/worker/worker.py` 注册新 Schedule/workflow/activity。
 
-- 这是 M0-M7 里第一个"旧系统没有可迁移先例"的里程碑，启动时需要先做设计对齐（聚合窗口/判定规则/输出 schema/触发方式），走 CLAUDE.md 的抽象设计确认流程，不能直接照抄 04-roadmap.md 里其他里程碑"从老系统提炼规则"的做法
-- 与 M8/M9 同级、互不阻塞，但触发条件不同（M8 依赖 M7 验收，M9 依赖明确的检索需求，M10 依赖 Digest 历史天数）
+**Step 2（单测+冒烟）**：新建 `backend/tests/test_deep_dive.py`（14 个用例，覆盖趋势统计/双门槛筛选/降序截断/0 命中兜底/`link_targets` 排除 digest id 等纯逻辑分支）；全量测试套件 148→149 全部通过。冒烟验证：把改动文件拷进运行中的 `temporal-worker` 容器，用真实窗口数据（2026-07-02~07-08，451 篇原文）跑通完整链路（不落库），确认趋势统计与真实 LLM 生成的导语质量符合预期。
+
+**Step 3（前端）**：`frontend/src/lib/doc-type.ts`/`frontend/src/components/enhance/LuminaBacklinks.astro` 补齐 `deep_dive`（这两处若遗漏会分别导致 `docHref()` 死链接、反链静默丢失——冒烟阶段类型检查主动发现的必改项，不在最初的改动清单里）；`pagination.ts` 新增 `DEEP_DIVES_PAGE_SIZE`；`live.config.ts` 新增 `deepDives` collection；`deep-dives/index.astro` 从"筹备中"占位页改造为真实列表页（镜像 `digest`/`topics` 列表页模式），新建 `more.astro`（分页片段端点）与 `[slug].astro`（详情页，正文含 wikilink，走 `getLiveEntry`+`render`+`LuminaBacklinks` 完整渲染管线，顶部用 `ChipsRail` 展示热门 topic 趋势卡片）。类型检查（`astro check`）过程中抓到一个真实 bug：`getLiveEntry` 第一个参数必须是 `live.config.ts` 里的 collection 变量名（`deepDives`），不是 doc_type 原始值（`deep_dive`）——已修正。
+
+**Step 4（部署验证）**：重建 `temporal-worker`/`web` 两个镜像并重启，确认 `ainews-deep-dive-weekly` Schedule 正确注册。**手动触发一次真实执行时发现一个真实 bug**：`compute_deep_dive_trends_activity` 的返回类型标注是未指定字段类型的 `-> dict`，`pydantic_data_converter` 解码这类跨 activity 边界传递的 dict 时，`window_start`/`window_end` 两个 `date` 字段会退化成 ISO 字符串（`date.isoformat()` 直接调用报 `AttributeError`），单测因为是直接函数调用（不经过 Temporal 序列化）没有暴露这个问题。修复：在 `generate_deep_dive_activity` 入口做显式双态兼容（`isinstance` 判断后 `date.fromisoformat()`），补一条回归单测覆盖字符串输入路径。修复后重新构建镜像、重启、再次手动触发，`documents` 表成功写入 `deep-dive-2026-07-08`（8 个热门话题，`links` 表新增 32 条出边），真实 HTTP 请求验证列表页/详情页均 200，wikilink 正确解析，Topic 详情页反链栏正确出现"深度周报"分组。这条真实产出的周报直接保留在库里作为上线后第一条数据，不清理。
+
+## 边界约束（已落实）
+
+- 不重新聚类：topic 归属直接复用每篇文章已有的 `topic_slug`，聚类 LLM 只在主流水线的 `aggregate_activity` 里调用一次。
+- 不修改任何既有 Topic/Daily/Digest/Original/Zettel 文档：`DeepDiveWorkflow` 全程只读 `original`/`digest`，只新增一条 `deep_dive` 记录。
+- v1 只做周报，不做月报：留待以后视需求评估，避免过度设计。
+- 不做"上周同期对比/增长率"环比分析：数据周期尚不够长，留待以后视需求评估。
+
+## 备注
+
+这是 M0-M9 里第一个"旧系统没有可迁移先例"的里程碑，走了完整的 CLAUDE.md 抽象设计确认流程（Plan Mode + Mermaid 架构图 + 用户显式批准）才开始编码，全过程分 4 步执行并逐步确认，两处真实 bug（前端 `getLiveEntry` collection key 不匹配、后端 Temporal 跨 activity dict 序列化丢失 date 类型）均由类型检查/真实端到端触发验证主动发现并修复，不是靠猜测推断代码正确。
+
+## 追加：重点加粗 + emoji 图标 + Mermaid 趋势饼图（2026-07-09，同日）
+
+用户看了首条真实周报后要求"增加重点加粗、图标，可以引入 mermaid 渲染"，并指出"加粗"应该扩大复用面到 Daily/Digest。同样先给出设计提案（复用范围/图表类型/渲染方案三点）经用户确认后再实现，分 3 步落地：
+
+- **加粗复用到共享源头**：`enrich.py::gist_activity`（`ArticleGist` schema）的 prompt 新增"用 Markdown `**加粗**` 标出 1-2 个核心关键词"指令——`gist` 是 Daily TL;DR/Daily 主题条目/Digest blurb/Deep Dive 代表文章行**共用的唯一摘要来源**，改一处即可让四个消费点同时生效，不需要分别处理。连带发现并修复一个真实的截断安全问题：Digest 的 `_truncate_blurb`（120 字硬截断）如果截断点刚好落在 `**加粗**` 标记中间会留下奇数个 `**`，渲染成 Markdown 时变成裸露星号而不是加粗——新增 `_balance_bold_markers` 辅助函数在截断后砍掉未闭合的加粗片段，补了单测覆盖。Deep Dive 自己的导语（`DeepDiveIntro`）和热门 topic 统计行也加了同样的加粗指令。
+- **emoji 图标**：Deep Dive"本周数据统计"区块四行各加语义化 emoji（🗓️📰📈📅），topic 小标题本来就有 emoji（`TOPIC_EMOJI`）不用新加。
+- **Mermaid 趋势饼图**：`deep_dive.py` 新增 `_build_trend_pie_chart`，直接从 `compute_deep_dive_trends_activity` 已经算好的 `trending_topics` 结构化统计机械拼接 mermaid `pie` 语法（不经过 LLM，避免图表语法出错或数字跟真实统计不一致），插在导语之后、分主题正文之前；0 个热门 topic 时不生成（没有数据可画）。**前端引入净新能力**：新增 `mermaid` npm 依赖 + `MermaidRenderer.astro`（客户端脚本，只接入 `deep-dives/[slug].astro`，不是全站默认行为）——找 `pre[data-language="mermaid"]` 提取 `textContent` 用 `mermaid.render()` 转 SVG 替换原来的代码块，监听 `astro:page-load` 适配全站 ClientRouter。实现前先用真实渲染管线做了实测（不是猜测）：确认现有 `rehype-sanitize` schema **不需要改动**——`code` 元素默认已允许 `/^language-./` 的 class，Astro/Shiki 实际把 mermaid 代码块渲染成 `<pre data-language="mermaid">`，而 `pre` 的 `data-language` 属性早就在白名单里（M6 起就有）。
+
+**真实验证**：后端新增 6 个单测（149→154 全部通过）；重建两个镜像重启后，重新手动触发 `DeepDiveWorkflow`（`window_end` 计算结果与首条记录相同，天然 upsert 刷新同一条 `deep-dive-2026-07-08`），数据库核对加粗/emoji/饼图代码块均正确生成；**用 Playwright 真实打开详情页截图确认**——饼图确实渲染成了带图例的彩色扇形图（不只是"代码能跑通"），加粗关键词、emoji 图标全部正常显示，浏览器控制台 0 报错。
+
+## 追加二：加粗力度加强 + 每日产出量柱状图 + 热度/延续性象限图（2026-07-09，同日）
+
+用户反馈"加粗内容还是有点少"，明确要求"每个文章的摘要信息都要有重点加粗，方便快速扫描抓重点"，并要求"再深度挖掘一下是否还有其他图表可以作为可视化内容"。
+
+- **加粗力度**：`gist_activity`/`ArticleGist`/`DeepDiveIntro` 三处 prompt 从"1-2 个关键词"提升到"2-4 处关键词/短语，或一句不超过15字的核心结论短句"，覆盖度明显提高。
+- **图表深度挖掘**：实现前用 Playwright 真实调用 mermaid 11.16.0（不是猜测）测试了 4 种候选图表（单系列柱状图/多系列折线图/象限图均渲染成功），综合"不堆砌图表"原则确定加 2 张而非全加：① `_build_daily_volume_bar_chart`——窗口内每日原文产出量，机械统计自 `_compute_daily_counts`（按日期填满窗口全部 7 天，含 0 篇的日子，保证柱子数量固定）；② `_build_trend_quadrant_chart`——按 (延续天数, 相对热度) 把每个热门 topic 定位到"持续热点/集中爆发/边缘话题/细水长流"四象限，这是最直接对应 M10 设计里"热门 topic 趋势线"这个说法的图，坐标机械归一化到 (0,1] 区间。放弃了多主题折线图（8 条线视觉太乱）和单独的"延续天数"柱状图（象限图已经把这个维度包含进去，重复）。三张图（柱状图/饼图/象限图）分别回答"节奏/占比/性质"三个不同问题，象限图要求至少 2 个热门 topic 才生成（1 个点归一化后 y 必为 1 没有对比意义）。
+- **真实发现并修复一个 mermaid 解析器 bug**：象限图上线首次真实渲染就在浏览器控制台报错——不是本项目代码问题，是 mermaid `quadrantChart` 词法分析器解析不了形如 `"1.0"` 这种小数点后只有一个尾随零的浮点数字面量（`[0.5, 1.0]` 报 Lexical error，`[0.5, 1]` 裸整数或 `[0.5, 0.99]` 非整数小数都正常）。这不是理论边缘情况——坐标固定归一化到 (0,1]，批次里 `total_count` 最高的那个 topic 必然精确算出 `1.0`，**每次都会触发**。排查过程没有靠猜测：先怀疑加粗/换行/中文字符，逐一隔离测试（Playwright 直接调 `mermaid.render()` 二分排查标题/坐标轴/象限标签/数据点各个字段组合），最终定位到具体是浮点数格式问题。修复：新增 `_format_quadrant_coord` 辅助函数，整数值（1.0/0.0）格式化成不带小数点的整数字面量，其余保留两位小数；补了直接针对这个 mermaid 解析器行为的回归单测。
+
+**真实验证**：后端新增 4 个单测（154→159 全部通过，含专门锁定 mermaid `"1.0"` 解析 bug 的回归测试）；重建镜像重启后重新触发 `DeepDiveWorkflow` 刷新同一条记录；**用 Playwright 真实截图确认三张图表全部正确渲染**（柱状图/饼图/象限图，象限图坐标点正确落在四象限空间内），浏览器控制台 0 报错，导语里能看到新加强的加粗（导语每次都是新生成的）。**当时未发现的遗留问题**：各 topic 小节下面列出的代表文章摘要仍然一处加粗都没有——这批 `gist` 是文章最初 enrich 时一次性生成、存在 `documents.original.frontmatter.gist` 里的历史值，Deep Dive 只读取现有值不会重新生成，prompt 改动只对之后新处理的文章生效，历史 gist 需要单独回填，见「追加三」。
+
+## 追加三：历史 gist 加粗回填 + 图表配色区分度（2026-07-09，同日）
+
+用户看到报告后指出"每篇的摘要信息都没有任何加粗重点信息"，并要求"删掉这篇 deep dive 重新跑一次"；同时反馈三张图表"颜色区分度太低"，要求加强。
+
+- **诊断**：核实 `original-1bce1ac8a146` 等代表文章的 `frontmatter.gist` 确实不含任何 `**` 标记——这些文章是本周批次（2026-07-02~07-08）早于今天加粗 prompt 改动前就已经 enrich 完成的历史数据。**单纯"删掉重新跑"不能解决问题**：`DeepDiveWorkflow` 只读取 `documents.original` 里已经存在的 `gist` 字段，不会重新调用 LLM 生成——重跑只是用同样的旧 gist 再拼一遍报告，加粗不会凭空出现。已把这个根因和"delete+rerun 实际无效"的结论说明给用户，转而执行正确的修复路径。
+- **修复**：先用 `compute_deep_dive_trends_activity` 拿到本周报告实际引用的 24 篇代表文章 doc_id（8 个热门 topic × 每个最多 3 篇），针对性地对这 24 篇（不是全部 451 篇窗口内文章——只有代表文章的 gist 会出现在报告正文里，全量回填成本不成比例）用新 prompt 重新调用 `gist_activity` 生成 gist，直接 `UPDATE documents SET frontmatter = jsonb_set(...)` 写回 `frontmatter.gist`（只改这一个字段，不碰 `topic_slug`/`related_zettel_id`/`body_md` 等其他字段），随后重新触发 `DeepDiveWorkflow` 刷新报告。**这个回填只影响 Deep Dive 的展示**——不会改变对应文章在已发布的 Daily/Digest/Topic 里的历史正文（那些文档在创建时已经把旧 gist 文本原样写死进自己的 `body_md`，不是运行时动态引用 `original.frontmatter.gist`），不算重写历史发布内容。
+- **图表配色**：mermaid 默认主题 8 个饼图色彼此明度/饱和度接近，8 个热门话题挤在一起区分度低。`MermaidRenderer.astro` 改用 `theme: 'base'` + 自定义 `themeVariables`（改自 Tableau 10 的高区分度定性调色板，饼图/柱状图/象限图数据点统一复用同一套色）。**过程中发现之前"站内没有深色模式"的判断是错的**——重新核查 `frontend/src/lib/theme-toggle-client.ts`/`tokens.css` 的 `[data-theme='dark']` 覆盖，确认站点确实有真实的深色模式切换，之前判断依据的是一次不完整的 grep 结果；顺手把 `mermaid.initialize()` 也改成读取 `document.documentElement.dataset.theme` 动态选取明暗两套文字/线条/象限背景色（数据本身的调色板两种主题下复用不变）。**排查配色不生效的过程走了弯路**：一开始在独立的 Playwright 沙盒页面里用 `esm.sh` CDN 动态 import mermaid 测试自定义 `themeVariables`，反复验证 `pie1`/`primaryColor` 等变量始终不生效（配置对象本身能读到正确值，但渲染出的 SVG 颜色岿然不动）——怀疑是 CDN 重新打包 mermaid 内部图表类型的懒加载 chunk 时破坏了主题配置的模块间共享状态。改为直接在真实项目环境（Vite 打包）里改完 `MermaidRenderer.astro` 重建镜像验证，一次就确认配色完全生效，说明沙盒环境不能代表生产环境下的构建行为，及时切换验证方式没有继续在错误的路径上打转。
+
+**真实验证**：24 篇代表文章 gist 回填后加粗标记从 11 处增至 112 处；重新触发 `DeepDiveWorkflow` 刷新报告；**用 Playwright 直接从真实渲染出的 SVG 提取 `fill` 属性核对**（不是肉眼判断"看起来是不是更好看"）——饼图 8 个扇形分别对应调色板 8 种颜色、象限图 4 个背景区域对应 4 种柱状图未涉及的浅色调、象限点与柱状图主色一致，浏览器控制台 0 报错。

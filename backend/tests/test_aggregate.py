@@ -190,6 +190,21 @@ def test_truncate_blurb_hard_cut_when_no_punctuation():
     assert len(result) == 21
 
 
+def test_balance_bold_markers_strips_dangling_marker():
+    """gist 现在可能含 **加粗** 标记，截断点落在标记中间会留下奇数个 `**`——渲染成
+    Markdown 时不会加粗，而是显示裸露的星号。"""
+    assert aggregate._balance_bold_markers("前面**没关好") == "前面"
+    assert aggregate._balance_bold_markers("前面**完整**都好") == "前面**完整**都好"
+    assert aggregate._balance_bold_markers("没有加粗标记") == "没有加粗标记"
+
+
+def test_truncate_blurb_strips_dangling_bold_marker_on_hard_cut():
+    text = "开头**关键词**" + "填充" * 30 + "结尾。"
+    result = aggregate._truncate_blurb(text, max_chars=5)
+    assert result.count("**") % 2 == 0
+    assert result.endswith("…")
+
+
 def test_digest_entries_skip_unknown_source(mocker):
     mocker.patch.object(aggregate, "load_sources", return_value={"openai-rss": object()})
     articles = [
