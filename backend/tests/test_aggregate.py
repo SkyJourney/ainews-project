@@ -328,3 +328,98 @@ def test_digest_record_body_does_not_repeat_title(mocker):
     articles = [make_enriched_article(url="https://a.com/1", source_name="openai-rss")]
     record = aggregate._build_digest_record(articles, date(2026, 7, 5))
     assert not record["body_md"].startswith("#")
+
+
+# ---------------------------------------------------------------------------
+# aggregate_activity 重跑幂等化（2026-07-09）：同一 batch_id 重跑时，已落库文章
+# 复用现有决策，不重新走 LLM 聚类/打标
+# ---------------------------------------------------------------------------
+
+def test_aggregate_activity_skips_llm_reclassification_for_already_processed_articles(mocker):
+    """已经在 documents 表有 original 记录的文章，重跑时不应该出现在丢给 LLM
+    聚类/打标的 articles 列表里——防止 LLM 判断的非确定性导致 topic 归属被无理由
+    重新洗牌（2026-07-09 真实批次复现过 165 篇里 44 篇被重新分类，追查到根因就是
+    重跑对全部文章无条件重新聚类）。"""
+    existing_article = make_enriched_article(url="https://example.com/existing")
+    new_article = make_enriched_article(url="https://example.com/new")
+    existing_original_id = aggregate._original_doc_id(existing_article["url"])
+    new_original_id = aggregate._original_doc_id(new_article["url"])
+
+    mocker.patch.object(aggregate, "fetch_enriched_articles", return_value=[existing_article, new_article])
+    # 两个 topic 都已存在，避免触发"新 topic 候选批次条数不足则降级"的既有规则
+    # （与本测试要验证的逻辑无关，参见 MIN_NEW_TOPIC_BATCH_COUNT）。
+    mocker.patch.object(aggregate, "aggregate_list_topic_slugs", return_value=["applications", "model-releases"])
+    mocker.patch.object(aggregate, "aggregate_lookup_url_index_entry", return_value=None)
+
+    def fake_get_document(doc_id):
+        if doc_id == existing_original_id:
+            return {"frontmatter": {"topic_slug": "applications", "related_zettel_id": None}}
+        return None
+
+    mocker.patch.object(aggregate, "aggregate_get_document", side_effect=fake_get_document)
+
+    cluster_assignment_calls: list[list[str]] = []
+
+    def fake_cluster_assignment(articles, existing_topics):
+        cluster_assignment_calls.append([a["url"] for a in articles])
+        return {
+            a["url"]: {"topic_slug": "model-releases", "zettel_worthy": False, "rationale": "新文章"}
+            for a in articles
+        }
+
+    mocker.patch.object(aggregate, "_run_cluster_assignment", side_effect=fake_cluster_assignment)
+
+    tag_assignment_calls: list[list[str]] = []
+
+    def fake_tag_assignment(articles):
+        tag_assignment_calls.append([a["url"] for a in articles])
+        return {a["url"]: [] for a in articles}
+
+    mocker.patch.object(aggregate, "_run_tag_assignment", side_effect=fake_tag_assignment)
+
+    topic_record_calls: dict[str, list[str]] = {}
+
+    def fake_build_topic_record(slug, entries, today):
+        topic_record_calls[slug] = [oid for _, _, oid in entries]
+        return {"doc_id": slug, "doc_type": "topic"}
+
+    mocker.patch.object(aggregate, "_build_topic_record", side_effect=fake_build_topic_record)
+    mocker.patch.object(aggregate, "_build_daily_record", return_value={"doc_id": "daily", "doc_type": "daily"})
+    mocker.patch.object(aggregate, "_build_digest_record", return_value={"doc_id": "digest", "doc_type": "digest"})
+    mocker.patch.object(aggregate, "write_activity", return_value=99)
+
+    result = aggregate.aggregate_activity("test-batch")
+
+    # 已处理文章不会出现在丢给 LLM 的列表里，只有新文章会
+    assert cluster_assignment_calls == [[new_article["url"]]]
+    assert tag_assignment_calls == [[new_article["url"]]]
+    # 已处理文章保留在它现有的 topic（applications），新文章进了 LLM 判断的新 topic
+    assert topic_record_calls["applications"] == [existing_original_id]
+    assert topic_record_calls["model-releases"] == [new_original_id]
+    assert result["written"] == 99
+
+
+def test_aggregate_activity_all_articles_already_processed_makes_no_llm_calls(mocker):
+    """极端情况：batch 内文章全部已处理过，LLM 聚类/打标应该被跳过（传入空列表，
+    不会真的发起网络请求）。"""
+    existing_article = make_enriched_article(url="https://example.com/existing")
+    existing_original_id = aggregate._original_doc_id(existing_article["url"])
+
+    mocker.patch.object(aggregate, "fetch_enriched_articles", return_value=[existing_article])
+    mocker.patch.object(aggregate, "aggregate_list_topic_slugs", return_value=["applications"])
+    mocker.patch.object(aggregate, "aggregate_lookup_url_index_entry", return_value=None)
+    mocker.patch.object(
+        aggregate,
+        "aggregate_get_document",
+        return_value={"frontmatter": {"topic_slug": "applications", "related_zettel_id": None}},
+    )
+    mocker.patch.object(
+        aggregate, "call_structured", side_effect=AssertionError("不应该发起任何 LLM 调用")
+    )
+    mocker.patch.object(aggregate, "_build_topic_record", return_value={"doc_id": "applications"})
+    mocker.patch.object(aggregate, "_build_daily_record", return_value={"doc_id": "daily"})
+    mocker.patch.object(aggregate, "_build_digest_record", return_value={"doc_id": "digest"})
+    mocker.patch.object(aggregate, "write_activity", return_value=1)
+
+    result = aggregate.aggregate_activity("test-batch")
+    assert result["written"] == 1

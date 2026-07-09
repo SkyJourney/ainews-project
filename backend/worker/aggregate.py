@@ -732,17 +732,46 @@ def aggregate_activity(batch_id: str) -> dict:
 
     today = date.today()
     existing_topics = set(aggregate_list_topic_slugs())
-    cluster_by_url = _run_cluster_assignment(articles, sorted(existing_topics))
-    decisions = _apply_granularity_rules(cluster_by_url, existing_topics)
-    tags_by_url = _run_tag_assignment(articles)
+
+    # 2026-07-09：区分"这篇文章的 original 文档是否已经存在"——同一个 batch_id 被
+    # 重跑（人工补录失败文章，或 Temporal 对整个 activity 的自动重试）时，已经成功
+    # 落库过的文章不该被重新丢进 LLM 聚类/打标：LLM 判断没有确定性保证，重新判断会
+    # 让 topic 归属大范围变化（真实批次复现过 165 篇里 44 篇被重新分类），进而在
+    # Topic 正文产生新旧两条引用、links 表累积孤立出边——这类"重跑"已经是第二次遇到，
+    # 治本做法是让重跑对已处理文章保持幂等：直接复用现有 documents 记录里的决策
+    # 结果，不重新调用 LLM，也不重新 upsert 内容未变的 original/zettel 文档；只有
+    # 真正的新文章（original 文档尚不存在）才走完整的聚类/打标/建 zettel 流程。
+    # 详见 .claude/memory/decisions.md「aggregate_activity 重跑幂等化」。
+    new_articles: list[dict] = []
+    reused_ctx: dict[str, dict] = {}
+    for article in articles:
+        original_id = _original_doc_id(article["url"])
+        existing = aggregate_get_document(original_id)
+        if existing is None:
+            new_articles.append(article)
+            continue
+        fm = existing["frontmatter"]
+        normalized = normalize_url_for_index(article["url"])
+        index_entry = aggregate_lookup_url_index_entry(normalized)
+        reused_ctx[article["url"]] = {
+            "original_id": original_id,
+            "zettel_id": fm.get("related_zettel_id"),
+            "is_new_zettel": False,
+            "topic_slug": fm["topic_slug"],
+            "is_recap": bool(index_entry and index_entry["first_seen_date"] != today),
+        }
+
+    cluster_by_url = _run_cluster_assignment(new_articles, sorted(existing_topics))
+    decisions_new = _apply_granularity_rules(cluster_by_url, existing_topics)
+    tags_by_url = _run_tag_assignment(new_articles)
 
     records: list[dict] = []
     used_zettel_ids: set[str] = set()
-    per_article_ctx: dict[str, dict] = {}
+    per_article_ctx: dict[str, dict] = dict(reused_ctx)
 
-    for article in articles:
+    for article in new_articles:
         url = article["url"]
-        decision = decisions[url]
+        decision = decisions_new[url]
         original_id = _original_doc_id(url)
         tags = tags_by_url.get(url, [])
         normalized = normalize_url_for_index(url)
@@ -769,6 +798,18 @@ def aggregate_activity(batch_id: str) -> dict:
         if is_new_zettel:
             records.append(_build_zettel_record(article, zettel_id, original_id, decision, tags))
 
+    # _build_daily_record/_compute_daily_stats 需要完整批次（含复用文章）的
+    # topic_slug/is_new_topic——复用文章补一份"伪 decision"，zettel_worthy/rationale
+    # 不会被下游用到（复用路径不会再走 _decide_zettel/_build_zettel_record）。
+    decisions: dict[str, dict] = dict(decisions_new)
+    for url, ctx in reused_ctx.items():
+        decisions[url] = {
+            "topic_slug": ctx["topic_slug"],
+            "zettel_worthy": ctx["zettel_id"] is not None,
+            "is_new_topic": False,
+            "rationale": "",
+        }
+
     topic_groups: dict[str, list[tuple[dict, str | None, str]]] = {}
     for article in articles:
         ctx = per_article_ctx[article["url"]]
@@ -782,7 +823,8 @@ def aggregate_activity(batch_id: str) -> dict:
     new_topic_count = len({d["topic_slug"] for d in decisions.values() if d["is_new_topic"]})
     new_zettel_count = sum(1 for ctx in per_article_ctx.values() if ctx["is_new_zettel"])
     activity.logger.info(
-        f"aggregate_activity: batch_id={batch_id} 原文 {len(articles)} 篇，"
+        f"aggregate_activity: batch_id={batch_id} 原文 {len(articles)} 篇"
+        f"（复用 {len(reused_ctx)} 篇既有决策，新处理 {len(new_articles)} 篇），"
         f"新建 topic {new_topic_count} 个，新建 zettel {new_zettel_count} 篇，共组装 {len(records)} 条文档记录"
     )
     if new_zettel_count > ZETTEL_YIELD_SOFT_MAX:
