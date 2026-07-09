@@ -400,3 +400,21 @@ def test_translate_oversized_chunk_splits_and_merges_successfully(mocker):
 
     assert had_residual_failure is False
     assert translated.count("翻译：") == 2  # 两半各自独立翻译成功，拼接后能看到两次结果
+
+
+def test_estimate_translate_timeout_seconds_small_article_hits_minimum():
+    body_md = "一小段正文。" * 20
+    assert enrich.estimate_translate_timeout_seconds(body_md) == enrich.MIN_TRANSLATE_TIMEOUT_SECONDS
+
+
+def test_estimate_translate_timeout_seconds_scales_with_chunk_count():
+    # 每段落刚好占满一个分块，凑出 20 个分块
+    body_md = "\n\n".join(["英文正文内容。" * 200] * 20)
+    chunk_count = len(enrich._chunk_paragraphs(body_md))
+    expected = enrich.BASE_TRANSLATE_TIMEOUT_SECONDS + enrich.PER_CHUNK_TIMEOUT_SECONDS * chunk_count
+    assert enrich.estimate_translate_timeout_seconds(body_md) == max(expected, enrich.MIN_TRANSLATE_TIMEOUT_SECONDS)
+
+
+def test_estimate_translate_timeout_seconds_huge_article_capped_at_maximum():
+    body_md = "\n\n".join(["英文正文内容。" * 200] * 200)  # 远超 131 分块的极端量级
+    assert enrich.estimate_translate_timeout_seconds(body_md) == enrich.MAX_TRANSLATE_TIMEOUT_SECONDS

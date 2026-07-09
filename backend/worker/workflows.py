@@ -21,11 +21,12 @@ with workflow.unsafe.imports_passed_through():
         translate_activity,
         upsert_article_activity,
     )
-    # needs_translation/compute_word_count/content_hash 是直接调用（不是 activity），
-    # 三者都在 enrich.py 里标了 "[Temporal 回放安全]"——必须保持确定性纯函数，改动前
-    # 先看那边的说明。
+    # needs_translation/compute_word_count/content_hash/estimate_translate_timeout_seconds
+    # 是直接调用（不是 activity），四者都在 enrich.py 里标了 "[Temporal 回放安全]"——
+    # 必须保持确定性纯函数，改动前先看那边的说明。
     from worker.enrich import compute_word_count
     from worker.enrich import content_hash as compute_content_hash
+    from worker.enrich import estimate_translate_timeout_seconds
     from worker.fetch import (
         fetch_activity,
         list_active_sources_activity,
@@ -68,17 +69,18 @@ class EnrichArticleWorkflow:
         translation_needed = needs_translation(params.entry.title, body_md)
 
         if translation_needed:
+            # 2026-07-09：固定 1800s 在 131 分块的 arxiv 超大论文上真实撞线过（enrich-85
+            # 彻底 enrich_failed，见 decisions.md）——改按分块数量动态估算，分块越多留的
+            # 预算越大，具体公式与参数取值见 enrich.py::estimate_translate_timeout_seconds。
+            translate_timeout_seconds = estimate_translate_timeout_seconds(body_md)
             translation = await workflow.execute_activity(
                 translate_activity,
                 args=[params.entry.title, body_md],
-                # 分块翻译内部已并发（_CHUNK_TRANSLATE_CONCURRENCY），但 arxiv 全文来源常见
-                # 30-50 个分块，300s→600s 都在真实全文批次下踩过超时（见 decisions.md
-                # "arxiv 只抓到摘要"修复记录 + 2026-07-07 M7 观察期批次 5 篇超大论文
-                # 翻译超时记录）。2026-07-07 起 translate_activity 内部按分块完成顺序上报
-                # heartbeat，改用 heartbeat_timeout 判断"真卡死"（90s 无新心跳），
-                # 不再需要靠不断调大固定 start_to_close_timeout 硬顶超大论文——硬上限本身
-                # 放宽到 1800s 只是兜底，正常不会跑满。
-                start_to_close_timeout=timedelta(seconds=1800),
+                # 分块翻译内部已并发（_CHUNK_TRANSLATE_CONCURRENCY），2026-07-07 起
+                # translate_activity 内部按分块完成顺序上报 heartbeat，heartbeat_timeout
+                # 判断"真卡死"（90s 无新心跳）与这里的 start_to_close_timeout（总预算
+                # 上限）是两层独立保护，前者不随分块数变化。
+                start_to_close_timeout=timedelta(seconds=translate_timeout_seconds),
                 heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=default_retry,
             )

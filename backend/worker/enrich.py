@@ -175,6 +175,32 @@ def _chunk_paragraphs(body_md: str, max_chars: int = MAX_CHUNK_CHARS) -> list[st
     return chunks
 
 
+# translate_activity 的 start_to_close_timeout 按分块数量动态估算（2026-07-09 新增）：
+# 固定 1800s 在 131 分块的 arxiv 超大论文上真实撞线过（enrich_failed）——分块翻译进度
+# 不做断点续传，心跳超时/网关抖动触发的重试都要从头重来，分块越多单次 attempt 需要的
+# 时间预算越大。PER_CHUNK_TIMEOUT_SECONDS 没有按"顺利路径"（实测约 3s/chunk）估算，而是
+# 按三层兜底重试链的中等重试开销取值：call_structured 单次最多 2 次 HTTP 尝试
+# （Instructor max_retries=1）×60s read timeout=120s 是单次调用的理论上限，一个 chunk
+# 若策略链两层都失败还会走安全切分递归，最坏情况下单个 chunk 可能触发 6-8 次独立调用；
+# 30s/chunk 是分摊了"一定比例 chunk 触发重试"之后的保守均值，不是理论最坏值（那样会把
+# 上限拉到不现实的量级）。
+BASE_TRANSLATE_TIMEOUT_SECONDS = 300
+PER_CHUNK_TIMEOUT_SECONDS = 30
+MIN_TRANSLATE_TIMEOUT_SECONDS = 1800
+MAX_TRANSLATE_TIMEOUT_SECONDS = 5400
+
+
+def estimate_translate_timeout_seconds(body_md: str) -> int:
+    """[Temporal 回放安全] 纯函数，workflows.py 直接调用（不经过 activity）估算
+    translate_activity 该给多长的 start_to_close_timeout：按 _chunk_paragraphs
+    实际会切出的分块数量动态放大，而不是用一个固定值硬顶所有文章。"""
+    chunk_count = len(_chunk_paragraphs(body_md))
+    return min(
+        MAX_TRANSLATE_TIMEOUT_SECONDS,
+        max(MIN_TRANSLATE_TIMEOUT_SECONDS, BASE_TRANSLATE_TIMEOUT_SECONDS + PER_CHUNK_TIMEOUT_SECONDS * chunk_count),
+    )
+
+
 # ---------------------------------------------------------------------------
 # SSRF 防护：本模块抓的 URL 来自外部信息源内容（RSS/webfetch 抽取结果等），不完全
 # 可信——恶意/被劫持的源可以在条目里塞一个指向 Docker 网络内部服务（db/redis）或云
