@@ -362,6 +362,84 @@ def deep_dive_list_digest_documents_in_window(window_start: date, window_end: da
     return [dict(row) for row in rows]
 
 
+def topic_deep_dive_list_original_documents_in_window(
+    topic_slug: str, window_start: date, window_end: date
+) -> list[dict]:
+    """`worker/deep_dive.py` 专题月报（M11）专用：取窗口内指定 topic 桶的全部原文归档
+    明细，供机械统计该桶本月 entry_count/逐日分布，以及子主题聚类（2026-07-09 深度改版
+    二起——聚类素材是该 topic 本月**全部**原文，不再经过 zettel 过滤，所以这里带上
+    `gist`；同样不重新聚类 topic 归属，直接按已有 topic_slug 过滤——M10 周报"跨文章判断
+    只能发生在 aggregate 阶段"这条铁律的延伸）。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id AS doc_id, doc_date, title, frontmatter->>'gist' AS gist
+                FROM documents
+                WHERE doc_type = 'original' AND frontmatter->>'topic_slug' = :topic_slug
+                  AND doc_date BETWEEN :window_start AND :window_end
+                """
+            ),
+            {"topic_slug": topic_slug, "window_start": window_start, "window_end": window_end},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def topic_deep_dive_list_zettel_documents_in_window(
+    topic_slug: str, window_start: date, window_end: date
+) -> list[dict]:
+    """`worker/deep_dive.py` 周报（M10）专用：取窗口内指定 topic 桶的全部 zettel——这是
+    周报每个热门 topic 深度分析的叙事骨架素材（zettel 本身就是"概念首次出现/重大事件
+    锚点/可复用洞察"的精炼原子笔记），自带 `original_id` 供反查全文做"深挖细节"。
+    专题月报（M11）2026-07-09 深度改版二起不再调用这个函数——月报的深挖池改为该 topic
+    本月全部原文（不经过 zettel 过滤，见 `deep_dive.py::_cluster_topic_articles`），
+    zettel 只是"是否值得单独建原子笔记"的独立判断，不能拿来当深度报告的准入门槛。
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id AS doc_id, doc_date, title,
+                       frontmatter->>'gist' AS gist,
+                       frontmatter->>'original_id' AS original_id
+                FROM documents
+                WHERE doc_type = 'zettel' AND frontmatter->>'topic_slug' = :topic_slug
+                  AND doc_date BETWEEN :window_start AND :window_end
+                """
+            ),
+            {"topic_slug": topic_slug, "window_start": window_start, "window_end": window_end},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def topic_deep_dive_fetch_original_fulltext(doc_ids: list[str]) -> list[dict]:
+    """`worker/deep_dive.py` 专题月报（M11）/周报（M10）共用：按 doc_id 批量取 original
+    全文正文（`body_md`），只取每个子主题/热门 topic 内挑选出的一个子集（月报每子主题
+    最多 `CLUSTER_FULLTEXT_LIMIT` 篇，周报每 topic 最多 `WEEKLY_TOPIC_FULLTEXT_LIMIT`
+    篇，见 deep_dive.py），不是窗口内全部原文——控制喂给 LLM 网关单次调用的体积（总
+    深挖篇数会随子主题/热门 topic 数量自然放大，2026-07-09 深度改版二起不再是整个
+    topic 固定一个上限）。`doc_ids` 为空时不查库直接返回空列表。
+    """
+    if not doc_ids:
+        return []
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id AS doc_id, doc_date, title, body_md
+                FROM documents
+                WHERE doc_type = 'original' AND id = ANY(:doc_ids)
+                """
+            ),
+            {"doc_ids": doc_ids},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def filter_lookup_url_index(normalized_url: str) -> dict | None:
     """filter_activity 专用：查询归一化 URL 是否已在跨日索引里（04 §2.3）。"""
     engine = get_engine()

@@ -12,7 +12,13 @@ with workflow.unsafe.imports_passed_through():
         list_arxiv_fulltext_backfill_candidates_activity,
         refresh_original_document_activity,
     )
-    from worker.deep_dive import compute_deep_dive_trends_activity, generate_deep_dive_activity
+    from worker.deep_dive import (
+        compute_deep_dive_trends_activity,
+        compute_topic_deep_dive_candidates_activity,
+        compute_topic_deep_dive_stats_activity,
+        generate_deep_dive_activity,
+        generate_topic_deep_dive_activity,
+    )
     from worker.enrich import (
         check_arxiv_fulltext_activity,
         fetch_original_activity,
@@ -35,7 +41,7 @@ with workflow.unsafe.imports_passed_through():
         record_source_health_activity,
     )
     from worker.filter import filter_activity
-    from worker.schemas import Entry, EnrichArticleParams, PipelineParams
+    from worker.schemas import Entry, EnrichArticleParams, PipelineParams, TopicDeepDiveParams
 
 
 @workflow.defn
@@ -382,9 +388,104 @@ class DeepDiveWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=default_retry,
         )
+        # generate_deep_dive_activity 现在给每个热门 topic 单独做一次深度分析 LLM 调用
+        # （2026-07-09 深度改版），不再是 1 次导语调用就完事——超时按热门话题数动态估算
+        # （仿 translate_activity 按分块数动态估算超时的既定模式），基础 120s 覆盖导语+
+        # 写库，每个热门话题（最多 MAX_TRENDING_TOPICS=8 个）额外估 150s。
+        topic_count = len(trends["trending"])
+        generate_timeout = timedelta(seconds=120 + 150 * topic_count)
         return await workflow.execute_activity(
             generate_deep_dive_activity,
             trends,
-            start_to_close_timeout=timedelta(seconds=120),
+            start_to_close_timeout=generate_timeout,
             retry_policy=default_retry,
         )
+
+
+@workflow.defn
+class TopicDeepDiveWorkflow:
+    """专题月报（M11）child workflow：单个达标 topic 的两段 activity（仿 DeepDiveWorkflow
+    结构），由 TopicDeepDiveMonthlyWorkflow 按达标 topic 数 fan-out 出来。失败隔离由
+    parent 的 asyncio.gather(..., return_exceptions=True) 负责（仿 EnrichArticleWorkflow
+    的既定模式），这个 child workflow 本身不需要额外处理。
+    """
+
+    @workflow.run
+    async def run(self, params: TopicDeepDiveParams) -> dict:
+        default_retry = RetryPolicy(maximum_attempts=3)
+        # compute_topic_deep_dive_stats_activity 现在还包含 1 次子主题聚类 LLM 调用
+        # （2026-07-09 深度改版二），30s 加到 90s 留余量。
+        stats = await workflow.execute_activity(
+            compute_topic_deep_dive_stats_activity,
+            params,
+            start_to_close_timeout=timedelta(seconds=90),
+            retry_policy=default_retry,
+        )
+        # generate_topic_deep_dive_activity 现在给每个子主题单独做一次深度分析 LLM
+        # 调用（不再是整个 topic 只有 1 次），超时按子主题数动态估算（仿周报
+        # DeepDiveWorkflow 按热门话题数动态估算的既定模式），基础 120s 覆盖延续性素材
+        # 查询+写库，每个子主题额外估 150s。
+        cluster_count = len(stats["clusters"])
+        generate_timeout = timedelta(seconds=120 + 150 * max(cluster_count, 1))
+        return await workflow.execute_activity(
+            generate_topic_deep_dive_activity,
+            stats,
+            start_to_close_timeout=generate_timeout,
+            retry_policy=default_retry,
+        )
+
+
+@workflow.defn
+class TopicDeepDiveMonthlyWorkflow:
+    """每月独立调度（1 号 09:00 Asia/Shanghai，见 worker.py::ensure_topic_deep_dive_monthly_
+    schedule），M10 周报的正交扩展：固定 1 个 topic 桶 × 自然月窗口的纵向深挖（M11，
+    2026-07-09 新增，见 .claude/memory/decisions.md）。
+
+    先机械统计上月各 topic 桶是否达标（compute_topic_deep_dive_candidates_activity），
+    再对达标 topic 做 child workflow fan-out（仿 EnrichArticleWorkflow 的 per-unit
+    fan-out + 失败隔离模式），每个 child 独立生成一条 deep_dive 记录，互不影响。
+    """
+
+    @workflow.run
+    async def run(self) -> dict:
+        default_retry = RetryPolicy(maximum_attempts=3)
+        # workflow 代码内必须用确定性时间源（同 DeepDiveWorkflow 的既定模式）。
+        # 09:00 Asia/Shanghai = 01:00 UTC，触发日固定是每月 1 号，.date() 直接取不会
+        # 跨月翻转。
+        today = workflow.info().start_time.date()
+        window_end = today.replace(day=1) - timedelta(days=1)  # 上月最后一天
+        window_start = window_end.replace(day=1)  # 上月第一天
+
+        candidates = await workflow.execute_activity(
+            compute_topic_deep_dive_candidates_activity,
+            args=[window_start, window_end],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=default_retry,
+        )
+
+        # per-topic fan-out：仿 AInewsPipelineWorkflow 的 enrich 阶段，某个 topic 生成
+        # 失败不影响其余 topic（不需要人工判断该不该重跑整批月报）。
+        results = await asyncio.gather(
+            *(
+                workflow.execute_child_workflow(
+                    TopicDeepDiveWorkflow.run,
+                    TopicDeepDiveParams(
+                        topic_slug=c["slug"], window_start=window_start, window_end=window_end
+                    ),
+                    id=f"topic-deep-dive-{window_end.isoformat()}-{c['slug']}",
+                )
+                for c in candidates
+            ),
+            return_exceptions=True,
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        for failure in failures:
+            workflow.logger.warning(f"TopicDeepDiveWorkflow 失败（不影响其余 topic）: {failure}")
+
+        return {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "candidate_count": len(candidates),
+            "succeeded": len(candidates) - len(failures),
+            "failed": len(failures),
+        }

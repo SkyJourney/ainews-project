@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -76,6 +77,19 @@ class EnrichArticleParams(BaseModel):
 
     entry: Entry
     batch_id: str
+
+
+class TopicDeepDiveParams(BaseModel):
+    """TopicDeepDiveWorkflow（M11 专题月报 child workflow）入参：单个达标 topic + 自然月
+    窗口。显式用 pydantic 模型（不是裸 dict）声明 window_start/window_end 的 date 类型——
+    M10 周报曾经因为跨 activity 边界传递未指定字段类型的 dict，导致 date 字段被
+    pydantic_data_converter 退化成 ISO 字符串（见 .claude/memory/decisions.md），这里
+    从一开始就用类型化模型规避同类问题，不需要下游再做 isinstance 兼容判断。
+    """
+
+    topic_slug: str
+    window_start: date
+    window_end: date
 
 
 class PreflightResult(BaseModel):
@@ -193,4 +207,83 @@ class DeepDiveIntro(BaseModel):
         description="一段150-300字的中文导语，基于给定的本周热门话题统计与文章素材，"
         "概括本周AI领域整体动态与延续性趋势，只能引用素材中出现的事实，不能编造；"
         "用 Markdown **加粗** 标出 2-4 处最核心的关键词/短语或核心结论短句，方便快速扫描"
+    )
+
+
+class TopicCluster(BaseModel):
+    """专题月报（M11）子主题聚类的一条线索（2026-07-09 深度改版二：从"zettel 门控素材"
+    改为"全部原文聚类"）。"""
+
+    heading: str = Field(description="子主题标题，8-16字，概括这条线索在讲什么，不要带 emoji（渲染时统一加）")
+    doc_ids: list[str] = Field(
+        description="属于这条子主题线索的原文 doc_id 列表，必须是给定素材里真实存在的 doc_id，不能编造"
+    )
+
+
+class TopicClusterResult(BaseModel):
+    """子主题聚类 tool schema：一次结构化调用，基于该 topic 本月**全部**原文的标题+摘要
+    （不经过 zettel 过滤——zettel 只是"是否值得单独建原子笔记"的独立判断，不代表文章
+    本身有没有价值，不能拿来当深度报告的准入门槛）识别出真实存在的子主题线索。LLM 只做
+    "这些文章能分成几条线索"的划分判断，不做"哪条线索该不该收录"这类门槛判断（本月是否
+    出报告是机械双门槛已经前置决定的）。"""
+
+    clusters: list[TopicCluster] = Field(
+        description="3-7 条真实存在的子主题线索，按素材实际呈现的情况划分，不要为了凑够"
+        "数量硬拆，也不要为了省事把明显不同的方向硬合并成一条；允许有文章不属于任何"
+        "清晰的子主题，不强制覆盖全部文章"
+    )
+
+
+class TopicRelationshipEdge(BaseModel):
+    """素材间的一条关系边（2026-07-09 新增，配合 TopicNarrativeAnalysis 的交叉验证/分歧
+    维度做可视化）：`from_id`/`to_id` 必须是给定素材里真实存在的 doc_id，代码侧会校验、
+    丢弃任何不在候选素材里的边（防止编造关系），不是靠 LLM 自觉。"""
+
+    from_id: str = Field(description="给定素材里的 doc_id（zettel 或深挖原文）")
+    to_id: str = Field(description="给定素材里的 doc_id（zettel 或深挖原文），不能与 from_id 相同")
+    relation: Literal["corroborates", "conflicts"] = Field(
+        description="两者关系：corroborates=相互印证同一信号，conflicts=观点/结论存在矛盾"
+    )
+    label: str = Field(description="8-16字关系说明，例如'均指向出口管制影响发布节奏'")
+
+
+class TopicNarrativeAnalysis(BaseModel):
+    """话题深度叙事分析 tool schema（周报 M10 + 专题月报 M11 共享，2026-07-09 深度改版，
+    2026-07-09 同日又追加"深度内容总结"字段）：一次结构化调用生成"深度内容总结 + 四个
+    分析维度"，取代早期"导语+小节"这种偏罗列/复述的结构。LLM 只整合分析，不判断"哪个
+    话题算热门/该不该出报告"（机械规则已前置决定），只能引用给定素材（materials/原文
+    深挖片段/上一期同话题素材）中的事实——四个分析维度里，任何一个维度在给定素材里
+    没有真实对应内容时，必须如实说明"未见明显XX"，不能为了凑够维度编造。"""
+
+    deep_summary: str = Field(
+        description="篇幅适度的深度内容总结：基于精读给定的原文全文（不是只看标题摘要）"
+        "综合写成的报告正文，讲清楚这段时期该话题具体发生了什么、涉及哪些关键产品/公司/"
+        "数据/事件、为什么重要、彼此之间有什么关联，行文要像真正的报道/分析文章——有具体"
+        "细节、有脉络，不是空泛概括也不是逐条罗列文章标题；具体篇幅以 system prompt 里的"
+        "指引为准；只能引用素材中出现的事实，不能编造；重要概念/文章用给定素材里标注的"
+        "[[doc_id]] 格式引用；用 Markdown **加粗** 标出全文最核心的关键词/短语或核心结论短句"
+    )
+    continuity: str = Field(
+        description="延续性分析（100-200字）：结合给定的'上一期同话题素材'，指出哪些方向"
+        "在延续演进、跟上期相比发生了什么变化；如果没有提供上一期素材，或本期与上期确实"
+        "没有明显延续关系，如实说明'未见明显延续对比'，不能编造"
+    )
+    cross_validation: str = Field(
+        description="交叉验证（100-200字）：不同原文之间相互印证、指向同一信号或结论的"
+        "地方，需要说明具体是哪些文章呼应了哪些内容；如果给定素材之间没有明显的相互印证，"
+        "如实说明'素材间未见明显交叉验证'，不能编造"
+    )
+    tensions: str = Field(
+        description="分歧/矛盾（100-200字）：不同原文之间观点、结论或立场上的矛盾/分歧，"
+        "需要说明具体是谁和谁的分歧；如果没有真实存在的分歧，如实说明'素材间未见明显分歧'，"
+        "不能为了凑内容编造矛盾"
+    )
+    emerging: str = Field(
+        description="新兴信号（100-200字）：本期素材中真正新出现、此前未见的方向/概念/"
+        "事件；如果本期内容都是延续性质、没有真正新东西，如实说明'本期未见明显新兴信号'"
+    )
+    relationships: list[TopicRelationshipEdge] = Field(
+        default_factory=list,
+        description="0-6 条素材间的关系边，用于可视化交叉验证/分歧网络；只能引用给定素材"
+        "里真实存在的 doc_id，没有真实存在的关系时返回空列表，不能为了凑数量编造",
     )

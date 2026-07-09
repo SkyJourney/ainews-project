@@ -14,6 +14,7 @@ Topic/Daily/Digest/Original/Zettel 文档，只新增一条 deep_dive 记录。
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 from temporalio import activity
@@ -22,10 +23,13 @@ from worker.aggregate import PLACEHOLDER_TOPIC, TOPIC_EMOJI, TOPIC_LABEL, topic_
 from worker.db import (
     deep_dive_list_digest_documents_in_window,
     deep_dive_list_original_documents_in_window,
+    topic_deep_dive_fetch_original_fulltext,
+    topic_deep_dive_list_original_documents_in_window,
+    topic_deep_dive_list_zettel_documents_in_window,
 )
 from worker.enrich import content_hash
 from worker.llm_client import call_structured
-from worker.schemas import DeepDiveIntro
+from worker.schemas import DeepDiveIntro, TopicClusterResult, TopicDeepDiveParams, TopicNarrativeAnalysis
 from worker.write import write_activity
 
 WINDOW_DAYS = 7
@@ -38,6 +42,84 @@ _INTRO_MODEL = "deepseek-v4-flash"
 
 _NO_TREND_NOTE = "本周内容集中度不足，未形成显著趋势。"
 _NO_MATERIAL_INTRO = "本周暂无可用于生成周报导语的素材。"
+
+# ---------------------------------------------------------------------------
+# 专题月报（M11）专用常量：固定 1 个 topic 桶 × 自然月窗口的纵向深挖，正交于上面的
+# 周报（全部 topic 桶 × 7 天窗口横向扫描）。详见 docs/milestones/M11-topic-deep-dive.md。
+# ---------------------------------------------------------------------------
+
+# 按月度窗口（约 4 倍于周报 7 天）粗略放大周报门槛（3/2），不是精确按比例换算——
+# 用户与设计讨论时确认的起点值，避免内容量不够的桶被迫出一篇单薄月报。
+MONTHLY_MIN_TOTAL_COUNT = 8
+MONTHLY_MIN_ACTIVE_DAYS = 4
+# 通用素材截断上限：超过机械截断取最新 N 条，不做二次 LLM 筛选（避免叙事阶段偷偷做
+# "哪些该保留"的跨条目判断）。历史上只用于 zettel 骨架截断，2026-07-09 深度改版二起
+# 也复用于"上一期同 topic 原文"截断——函数名/常量名沿用旧名字，但已是通用的
+# "按 doc_date 降序截断"工具，不是 zettel 专属。
+MONTHLY_ZETTEL_LIMIT = 30
+
+_NO_MONTHLY_MATERIAL_INTRO = "本月该专题暂无可用于生成月报导语的素材。"
+_NO_CLUSTER_NOTE = "本月该专题未识别出明确的子主题线索。"
+_WIKILINK_ID_RE = re.compile(r"\[\[([^\]|#]+)")
+
+# ---------------------------------------------------------------------------
+# 专题月报子主题聚类常量（2026-07-09 深度改版二，见 .claude/memory/decisions.md）：
+# 用户反馈首版月报"只是几个维度的汇总，不是真正的专题报告"——根因是深挖池被 zettel
+# 过滤门控（很多 topic 大部分原文都没有对应 zettel，等于大量有价值内容从未进入报告
+# 视野）。改为先对该 topic 本月**全部**原文聚类出真实子主题线索，再逐个子主题独立
+# 深挖，报告篇幅由素材丰富度自然决定，不再是固定的"一段总览+四段维度"。
+# ---------------------------------------------------------------------------
+
+# 每个子主题深挖全文篇数上限：不再像旧版本那样整个 topic 只挑 10 篇，而是每个子主题
+# 各自独立挑选，总深挖篇数随子主题数自然放大（最多 7 个子主题 × 8 篇 = 56 篇）。
+CLUSTER_FULLTEXT_LIMIT = 8
+# 喂给聚类 LLM 调用的原文 title+gist 数量上限：防御性上限，gist 是一句话摘要体积小，
+# 正常月份的 topic 原文数（几十篇量级）远低于这个数字，不会真的触发截断。
+CLUSTER_SKELETON_LIMIT = 200
+
+# ---------------------------------------------------------------------------
+# 深度叙事引擎共享常量（2026-07-09 深度改版，见 .claude/memory/decisions.md）：
+# 周报/月报此前"机械 bullet 列表"/"导语+小节"两套结构都偏罗列复述，改成周报+月报
+# 共用同一套"五维度深度分析"引擎（_generate_topic_analysis），只是窗口长度、素材规模、
+# 喂给 LLM 的深挖全文篇数不同。
+# ---------------------------------------------------------------------------
+
+# 周报每个热门 topic 深挖全文篇数上限：周报窗口只有 7 天、代表文章数天然更少，单独定
+# 一个比月报（每子主题 CLUSTER_FULLTEXT_LIMIT=8）更小的数字，不是共用一套。
+WEEKLY_TOPIC_FULLTEXT_LIMIT = 5
+_MERMAID_LABEL_UNSAFE_RE = re.compile(r'["|\[\]\n`]')
+
+# 深度内容总结的篇幅目标（2026-07-09 追加：用户反馈子主题分析仍偏"压缩摘要"，要求
+# "精读原文"后写出篇幅适度的深度报告正文，不是几句话）：周报保持原有简短基调（单份
+# 报告要覆盖最多 8 个热门 topic，每个都写长会导致周报臃肿到难以阅读）；月报因为是
+# "固定 1 个 topic 纵向深挖"定位，明显放长——两者共用同一个 _generate_topic_analysis
+# 函数，只是措辞参数不同。
+#
+# 2026-07-09 同日再追加：篇幅不再是固定字符串，改按素材篇数（不是深挖全文篇数，是该
+# 方向/话题涉及的全部原文数）动态分档——原文越多说明这个方向本身内容越丰富，理应写得
+# 越充分，不能不管素材多寡都套用同一个固定区间。档位边界（5/15篇）没有精确的数学
+# 依据，是"明显更多/明显更少"这个直觉的粗粒度体现，后续可以根据实际产出效果调整。
+WEEKLY_SUMMARY_LENGTH_TIERS: list[tuple[int, str]] = [
+    (0, "150-300字"),
+    (5, "300-500字"),
+    (15, "500-800字"),
+]
+MONTHLY_SUMMARY_LENGTH_TIERS: list[tuple[int, str]] = [
+    (0, "400-700字"),
+    (5, "600-1200字"),
+    (15, "1000-1800字"),
+]
+
+
+def _dynamic_summary_length_hint(article_count: int, tiers: list[tuple[int, str]]) -> str:
+    """根据素材篇数动态选择深度总结的篇幅目标，取满足"素材篇数 >= 篇数下限"的最高
+    档位。tiers 必须按篇数下限升序排列（WEEKLY_SUMMARY_LENGTH_TIERS/MONTHLY_SUMMARY_
+    LENGTH_TIERS 已经是升序，调用方不需要再排序）。"""
+    hint = tiers[0][1]
+    for threshold, length_hint in tiers:
+        if article_count >= threshold:
+            hint = length_hint
+    return hint
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +204,10 @@ def _generate_intro(trending: list[dict], digests: list[dict]) -> str:
         model=_INTRO_MODEL,
         system_prompt=(
             "你是资讯周报编辑。根据给定的本周热门话题统计和逐日 Digest 原文，写一段150-300字"
-            "的中文导语，概括本周AI领域整体动态与延续性趋势。只能引用素材中出现的事实，不能编造，"
-            "不需要逐条罗列，重点讲清楚趋势和关联。用 Markdown **加粗** 标出 2-4 处最核心的"
+            "的中文导语，概括本周AI领域整体动态与延续性趋势——正文后面每个热门话题都会有独立的"
+            "深度分析小节（延续性/交叉验证/分歧/新兴信号），这里只需要跨话题的全局总览，"
+            "不需要重复小节里的细节。只能引用素材中出现的事实，不能编造，不需要逐条罗列，"
+            "重点讲清楚趋势和关联。用 Markdown **加粗** 标出 2-4 处最核心的"
             "关键词/短语（如核心趋势、代表性产品/公司名）或不超过15字的核心结论短句，"
             "方便读者快速扫描抓重点，不要整句话加粗。"
         ),
@@ -147,10 +231,11 @@ def _build_trend_pie_chart(trending: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_daily_volume_bar_chart(daily_counts: list[dict]) -> str:
+def _build_daily_volume_bar_chart(daily_counts: list[dict], title: str = "本周每日产出量") -> str:
     """机械生成 mermaid 柱状图代码块，展示窗口内每日原文产出量——直接从
     _compute_daily_counts 已经算好的逐日统计拼接固定语法，不经过 LLM。空窗口
-    （daily_counts 为空，理论上不会发生）调用方不应该调这个函数。"""
+    （daily_counts 为空，理论上不会发生）调用方不应该调这个函数。`title` 可覆盖默认
+    文案——专题月报（M11）复用同一个函数，标题需要带上专题名而不是"本周"。"""
     labels = [d["date"][5:] for d in daily_counts]  # "2026-07-02" -> "07-02"，柱状图标签不需要年份
     counts = [d["count"] for d in daily_counts]
     max_count = max(counts)
@@ -160,7 +245,7 @@ def _build_daily_volume_bar_chart(daily_counts: list[dict]) -> str:
     lines = [
         '```mermaid',
         'xychart-beta',
-        '    title "本周每日产出量"',
+        f'    title "{title}"',
         f'    x-axis [{x_axis_labels}]',
         f'    y-axis "原文数" 0 --> {y_max}',
         f'    bar [{bar_values}]',
@@ -212,17 +297,98 @@ def _format_quadrant_coord(value: float) -> str:
     return str(value)
 
 
-def _render_trend_section(topic: dict) -> str:
+def _previous_weekly_window(window_start: date) -> tuple[date, date]:
+    """上一个对应周报窗口：紧邻当前窗口之前的 7 天，供延续性分析对比素材使用。"""
+    prev_end = window_start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=WINDOW_DAYS - 1)
+    return prev_start, prev_end
+
+
+def _previous_monthly_window(window_start: date) -> tuple[date, date]:
+    """上一个自然月窗口：当前月的上一个完整自然月，供延续性分析对比素材使用。"""
+    prev_end = window_start - timedelta(days=1)
+    prev_start = prev_end.replace(day=1)
+    return prev_start, prev_end
+
+
+def _sanitize_mermaid_label(text: str, max_length: int = 24) -> str:
+    """LLM 生成的关系说明文本要拼进 mermaid flowchart 的边标签语法（`|"label"|`），
+    双引号/竖线/方括号/换行会破坏语法结构——项目已经在 quadrantChart 坐标格式化上踩过
+    一次真实的 mermaid 解析器 bug（见 _format_quadrant_coord），这里对自由文本做防御性
+    清洗，不假设 LLM 输出一定是"安全"的短语。"""
+    cleaned = _MERMAID_LABEL_UNSAFE_RE.sub("", text).strip()
+    return cleaned[:max_length] if len(cleaned) > max_length else cleaned
+
+
+def _build_relationship_chart(relationships: list[dict]) -> str:
+    """机械生成 mermaid flowchart 代码块，可视化交叉验证/分歧关系网络。relationships
+    在 _generate_topic_analysis 里已经做过候选素材校验（LLM 编造的、不在候选素材里的边
+    已被过滤掉）且附带了 from_title/to_title（文章真实标题，不是 doc_id），这里只负责
+    渲染，不重新校验。空列表时不画图（没有关系可视化就没意义）。corroborates 用绿色
+    实线箭头，conflicts 用红色虚线箭头区分视觉语义。节点 id 用位置索引起别名（doc_id
+    本身含连字符，直接当 mermaid 节点 id 会被词法分析器当成箭头语法的一部分），节点
+    标签里放文章标题（不是 doc_id 字符串）——标题比 doc_id 更有信息量，读者一眼就能
+    看懂这个节点是哪篇文章，不需要去猜 doc_id 对应什么内容。"""
+    if not relationships:
+        return ""
+    node_ids: dict[str, str] = {}
+    lines = ["```mermaid", "flowchart LR"]
+    for edge in relationships:
+        for doc_id, title in ((edge["from_id"], edge["from_title"]), (edge["to_id"], edge["to_title"])):
+            if doc_id not in node_ids:
+                alias = f"n{len(node_ids)}"
+                node_ids[doc_id] = alias
+                label = _sanitize_mermaid_label(title, max_length=30)
+                lines.append(f'    {alias}["{label}"]')
+    for edge in relationships:
+        src, dst = node_ids[edge["from_id"]], node_ids[edge["to_id"]]
+        label = _sanitize_mermaid_label(edge["label"])
+        if edge["relation"] == "corroborates":
+            lines.append(f'    {src} -->|"✅ {label}"| {dst}')
+        else:
+            lines.append(f'    {src} -.->|"⚡ {label}"| {dst}')
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def _render_analysis_dimensions(analysis: dict) -> str:
+    """渲染深度分析正文（深度内容总结+延续性+交叉验证+分歧+新兴信号+关系图），不含标题/
+    参考文章——月报（2026-07-09 深度改版二）按子主题多次调用组装多章节报告，也被
+    _render_topic_analysis_section（周报单 topic 用）复用，避免两处重复渲染逻辑。"""
     lines = [
-        topic_heading(topic["slug"]),
+        analysis["deep_summary"],
         "",
-        f"**本周 {topic['total_count']} 条 / {topic['active_days']} 天活跃**",
+        f"**延续性**：{analysis['continuity']}",
         "",
+        f"**交叉验证**：{analysis['cross_validation']}",
+        "",
+        f"**分歧**：{analysis['tensions']}",
+        "",
+        f"**新兴信号**：{analysis['emerging']}",
     ]
-    lines.extend(
-        f"- [[{r['doc_id']}]] {r['title']}（来源：{r['source_name']}）：{r['gist']}"
-        for r in topic["representatives"]
-    )
+    relationship_chart = _build_relationship_chart(analysis["relationships"])
+    if relationship_chart:
+        lines.extend(["", relationship_chart])
+    return "\n".join(lines)
+
+
+def _render_topic_analysis_section(
+    topic_slug: str, analysis: dict, representatives: list[dict] | None = None
+) -> str:
+    """渲染单个 topic 的深度分析小节（周报专用：一个热门 topic 一段五维度分析）：
+    topic_heading + 五维度分析正文 + 可选的"参考文章"链接列表（保留快速跳转入口）。
+    月报（2026-07-09 深度改版二起）不再调用这个函数——月报现在是"一个 topic 拆成多个
+    子主题小节"的结构，直接用 _render_analysis_dimensions 按子主题组装，见
+    _build_topic_deep_dive_record。
+    """
+    lines = [topic_heading(topic_slug), "", _render_analysis_dimensions(analysis)]
+    if representatives:
+        lines.append("")
+        lines.append("**参考文章**")
+        lines.extend(
+            f"- [[{r['doc_id']}]] {r['title']}（来源：{r['source_name']}）：{r['gist']}"
+            for r in representatives
+        )
     return "\n".join(lines)
 
 
@@ -238,8 +404,15 @@ def _build_deep_dive_record(
     title = f"{window_start.isoformat()} ~ {window_end.isoformat()} AI 深度周报"
     doc_id = f"deep-dive-{window_end.isoformat()}"
 
+    # 每个热门 topic 一个深度分析小节（延续性/交叉验证/分歧/新兴信号 + 关系图），取代
+    # 早期版本"机械 bullet 列表"——那个版本完全没有 LLM 参与，是"只是罗列文章"观感的
+    # 直接原因（见 .claude/memory/decisions.md 深度改版记录）。t["analysis"] 由
+    # generate_deep_dive_activity 在调用本函数前逐个 topic 调 _generate_topic_analysis
+    # 生成并写回 trending 条目。
     sections = (
-        "\n\n".join(_render_trend_section(t) for t in trending)
+        "\n\n".join(
+            _render_topic_analysis_section(t["slug"], t["analysis"], t["representatives"]) for t in trending
+        )
         if trending
         else f"## 本周趋势\n\n{_NO_TREND_NOTE}"
     )
@@ -265,13 +438,20 @@ def _build_deep_dive_record(
     # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
     body_md = intro + "\n\n" + charts_section + sections + "\n\n" + stats_section + "\n"
 
-    # 只链接正文里实际出现的引用（热门 topic slug + 各自代表文章），不制造正文没提到的
-    # 悬空/无意义边；source_digest_ids 只做 frontmatter 可追溯字段，不进 links 表——
-    # Digest 本身"明确不用 wikilink"，给它建反链边不会被任何页面展示，是死边。
+    # link_targets：topic slug（deterministic，topic_heading() 渲染进小节开头）+ 代表
+    # 文章（deterministic，"参考文章"bullet 列表）+ 分析正文里实际引用到的素材 wikilink
+    # （zettels ∪ fulltext_ids 候选集合内、且真的被 LLM 生成的五段分析文本引用到的那部分，
+    # 用 _extract_cited_doc_ids 同monthly一致的方式过滤，不制造悬空/无意义边）。
     link_targets: list[str] = []
     for t in trending:
         link_targets.append(t["slug"])
         link_targets.extend(r["doc_id"] for r in t["representatives"])
+        zettel_ids = [z["doc_id"] for z in t["zettels"]]
+        valid_material_ids = zettel_ids + [oid for oid in t["fulltext_ids"] if oid not in zettel_ids]
+        analysis_text = "\n".join(
+            [t["analysis"]["deep_summary"], t["analysis"]["continuity"], t["analysis"]["cross_validation"], t["analysis"]["tensions"], t["analysis"]["emerging"]]
+        )
+        link_targets.extend(_extract_cited_doc_ids(analysis_text, valid_material_ids))
 
     return {
         "doc_id": doc_id,
@@ -295,6 +475,326 @@ def _build_deep_dive_record(
         "tags": [],
         "link_targets": link_targets,
     }
+
+
+# ---------------------------------------------------------------------------
+# 纯函数：专题月报（M11 新增，可单测，不依赖 DB/LLM）
+# ---------------------------------------------------------------------------
+
+def _compute_monthly_topic_candidates(rows: list[dict]) -> list[dict]:
+    """按 topic_slug 分组统计上月 total_count（原文数）/active_days（distinct 日期数），
+    双门槛（MONTHLY_MIN_TOTAL_COUNT/MONTHLY_MIN_ACTIVE_DAYS）机械筛选达标 topic。不像
+    周报那样再截断 top-N——预设 topic 桶数量本身有限（10 个），fan-out 规模天然有界，
+    不需要二次截断；`uncategorized` 溢出桶不是真实聚类结果，不参与评选。返回值按
+    total_count 降序排列，只是为了展示友好，不影响后续 fan-out 顺序。
+    """
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        slug = row.get("topic_slug")
+        if not slug or slug == PLACEHOLDER_TOPIC:
+            continue
+        bucket = grouped.setdefault(slug, {"slug": slug, "dates": set(), "count": 0})
+        bucket["dates"].add(row["doc_date"])
+        bucket["count"] += 1
+
+    candidates = []
+    for bucket in grouped.values():
+        total_count = bucket["count"]
+        active_days = len(bucket["dates"])
+        if total_count < MONTHLY_MIN_TOTAL_COUNT or active_days < MONTHLY_MIN_ACTIVE_DAYS:
+            continue
+        candidates.append({"slug": bucket["slug"], "total_count": total_count, "active_days": active_days})
+    candidates.sort(key=lambda c: c["total_count"], reverse=True)
+    return candidates
+
+
+def _select_monthly_zettel_material(zettels: list[dict], limit: int = MONTHLY_ZETTEL_LIMIT) -> list[dict]:
+    """本月该 topic 全部 zettel 若超过上限，机械截断取最新 N 条（按 doc_date 降序），
+    不做二次 LLM 筛选——避免叙事阶段偷偷做"哪些该保留"的跨条目判断。"""
+    return sorted(zettels, key=lambda z: z["doc_date"], reverse=True)[:limit]
+
+
+def _select_fulltext_original_ids(zettels: list[dict], limit: int) -> list[str]:
+    """从叙事骨架 zettel 素材（已经过 _select_monthly_zettel_material 截断）反查
+    original_id，按 zettel 的 doc_date 降序取前 N 个（机械排序，不是"代表性"判断），
+    供"深挖细节"取全文使用。zettel 的 doc_date 与其对应 original 的 doc_date 同源
+    （均取自文章 published_at，见 aggregate.py::_build_zettel_record），可以直接复用
+    排序，不需要再单独查一次 original 表确认。周报专用（月报 2026-07-09 深度改版二起
+    改走 _cluster_topic_articles + _select_cluster_fulltext_ids，不再经过 zettel 反查）。
+    """
+    ordered = sorted(zettels, key=lambda z: z["doc_date"], reverse=True)
+    seen: set[str] = set()
+    original_ids: list[str] = []
+    for z in ordered:
+        original_id = z.get("original_id")
+        if not original_id or original_id in seen:
+            continue
+        seen.add(original_id)
+        original_ids.append(original_id)
+        if len(original_ids) >= limit:
+            break
+    return original_ids
+
+
+def _empty_topic_analysis(no_material_note: str) -> dict:
+    """素材皆空时的机械兜底结构（不调 LLM）——理论上很少发生（周报/月报都有前置门槛
+    保证一定量素材），只是防御性兜底，跟 _generate_intro 的空素材兜底同一个性质。"""
+    return {
+        "deep_summary": no_material_note,
+        "continuity": "",
+        "cross_validation": "",
+        "tensions": "",
+        "emerging": "",
+        "relationships": [],
+    }
+
+
+def _generate_topic_analysis(
+    topic_slug: str,
+    window_label: str,
+    materials: list[dict],
+    fulltexts: list[dict],
+    previous_materials: list[dict],
+    summary_length_hint: str,
+) -> dict:
+    """周报（M10）+ 专题月报（M11）共用的深度分析引擎（2026-07-09 深度改版，同日又追加
+    "深度内容总结"字段与动态篇幅，见 .claude/memory/decisions.md）：素材皆空时机械兜底
+    不调 LLM，否则拼 prompt 用给定素材（部分原文全文为主 + 未展开全文的条目列表补充
+    覆盖面 + 上一期同话题素材摘要）生成"深度内容总结 + 四个分析维度"——不是简单复述
+    文章列表，深度总结要求基于精读全文写成，不能只依赖标题摘要。`window_label` 只影响
+    prompt 措辞（"本周"/"本月"），`summary_length_hint` 是调用方算好的篇幅目标字符串
+    （按素材篇数动态分档，见 `_dynamic_summary_length_hint`/`WEEKLY_SUMMARY_LENGTH_
+    TIERS`/`MONTHLY_SUMMARY_LENGTH_TIERS`，本函数不关心分档逻辑，只负责把结果塞进
+    prompt），窗口长度、素材规模均由调用方决定。`materials`/`previous_materials` 是
+    通用的 `{doc_id, title, gist}` 形状列表——周报调用方传入真实 zettel 行，月报
+    2026-07-09 深度改版二起改传入某个子主题下的原文行（不再门控于 zettel，见
+    _cluster_topic_articles），两者对这个函数是透明的，字段形状一致即可复用。返回 dict
+    （不是 pydantic 对象）方便下游直接用于组装 body_md/frontmatter；relationships 会
+    先过滤成只保留候选素材（materials ∪ fulltexts）里真实存在的 doc_id 组合，防止 LLM
+    编造的关系边被渲染进图表。
+    """
+    label = TOPIC_LABEL.get(topic_slug, topic_slug)
+    if not materials and not fulltexts:
+        return _empty_topic_analysis(f"{window_label}该专题暂无可用于生成分析的素材。")
+
+    # 全文排在素材前面且措辞强调"精读依据"——用户反馈此前"全文只是补充细节参考"的
+    # 措辞把全文降级成了装饰，深度总结实际上主要靠标题摘要拼凑；这里反过来，未展开
+    # 全文的条目列表改成"整体覆盖面参考"，不再是主要写作依据。
+    fulltext_blocks = [f"### [[{f['doc_id']}]] {f['title']}\n{f['body_md']}" for f in fulltexts]
+    material_lines = [f"- [[{m['doc_id']}]] {m['title']}：{m['gist']}" for m in materials]
+    previous_lines = (
+        [f"- [[{m['doc_id']}]] {m['title']}：{m['gist']}" for m in previous_materials]
+        if previous_materials
+        else ["（上一期没有该话题的素材，或本话题是本期新出现的）"]
+    )
+
+    user_content = (
+        f"{window_label}「{label}」相关的代表文章全文（深度总结应主要基于精读这些全文撰写）：\n\n"
+        + "\n\n".join(fulltext_blocks) + "\n\n"
+        f"{window_label}「{label}」相关的完整文章列表（含未展开全文的条目，仅用于把握整体"
+        "覆盖面，不是深度总结的主要写作依据）：\n" + "\n".join(material_lines) + "\n\n"
+        f"上一期「{label}」相关素材（供延续性对比参考）：\n" + "\n".join(previous_lines)
+    )
+    result = call_structured(
+        model=_INTRO_MODEL,
+        system_prompt=(
+            f"你是资讯深度分析编辑。根据给定的{window_label}「{label}」相关代表文章全文（主要"
+            "依据，要求精读，不能只扫一眼标题摘要）、完整文章列表（补充覆盖面）、以及上一期"
+            "同话题素材，写出真正有深度的报告——不是逐条复述文章，而是要综合判断：① 深度"
+            f"内容总结（{summary_length_hint}）：基于精读全文，讲清楚这段时期该话题具体发生"
+            "了什么、涉及哪些关键产品/公司/数据/事件、为什么重要、彼此之间有什么关联，行文"
+            "要像真正的报道/分析文章，有具体细节和脉络，不是空泛概括也不是逐条罗列文章标题；"
+            "排版可以根据内容特点灵活组织——如果有多个并列的具体案例/产品/数据点，可以用"
+            "小标题或分点呈现会更清晰，不必所有内容都挤在一个大段落里，但整体仍要保持叙事"
+            "连贯，不是简单罗列条目；② 延续性：对比上一期素材，哪些方向在持续演进、有什么变化；③ 交叉验证：不同"
+            "原文之间相互印证同一信号的地方，具体是哪些文章呼应了哪些内容；④ 分歧：不同原文"
+            "观点/结论上的矛盾，具体是谁和谁的分歧；⑤ 新兴信号：真正新出现、此前未见的方向。"
+            "只能引用素材中出现的事实，不能编造，没有真实对应内容的维度要如实说明'未见明显"
+            "XX'，不能为了凑够维度硬编。重要概念/文章请用给定素材里标注的 [[doc_id]] 格式"
+            "引用；用 Markdown **加粗** 标出深度内容总结里最核心的关键词/短语或核心结论短句"
+            "（大致每 250-300 字标 1 处，篇幅越长处数按比例增加，不要堆砌）。另外用"
+            "relationships 字段标注 0-6 条素材间的关系（相互印证或矛盾），from_id/to_id"
+            "必须是给定素材里出现过的 doc_id，没有真实关系时留空，不能为了凑数量编造。"
+        ),
+        user_content=user_content,
+        response_model=TopicNarrativeAnalysis,
+    )
+
+    # id_to_title 同时承担两个作用：① 候选素材存在性校验（LLM 编造的、不在候选素材里的
+    # id 会被排除）② 给关系图节点提供真实标题（不是 doc_id 字符串，读者能一眼看懂）。
+    id_to_title = {m["doc_id"]: m["title"] for m in materials}
+    id_to_title.update({f["doc_id"]: f["title"] for f in fulltexts})
+    relationships = [
+        {
+            "from_id": e.from_id,
+            "from_title": id_to_title[e.from_id],
+            "to_id": e.to_id,
+            "to_title": id_to_title[e.to_id],
+            "relation": e.relation,
+            "label": e.label,
+        }
+        for e in result.relationships
+        if e.from_id in id_to_title and e.to_id in id_to_title and e.from_id != e.to_id
+    ]
+    return {
+        "deep_summary": result.deep_summary,
+        "continuity": result.continuity,
+        "cross_validation": result.cross_validation,
+        "tensions": result.tensions,
+        "emerging": result.emerging,
+        "relationships": relationships,
+    }
+
+
+def _cluster_topic_articles(topic_slug: str, articles: list[dict]) -> list[dict]:
+    """Stage 1（子主题聚类，2026-07-09 深度改版二，见 .claude/memory/decisions.md）：
+    月报此前用 zettel 命中与否决定"哪些原文进深挖池"，但 zettel 只是"是否值得单独建
+    原子笔记"这个独立判断，不代表文章本身有没有价值，不能拿来当深度报告的准入门槛
+    （用户反馈：某些 topic 90% 的原文从未真正进入报告视野）。这里改为基于该 topic
+    本月**全部**原文的 title+gist（不经过 zettel 过滤）识别 3-7 条真实存在的子主题
+    线索，每条线索关联具体 doc_id。素材皆空/超过 CLUSTER_SKELETON_LIMIT 时机械截断，
+    不做二次 LLM 筛选。机械校验每条线索的 doc_ids 必须真实存在于候选文章里，过滤掉
+    编造的 id；doc_ids 校验后为空的线索整体丢弃。0 条有效线索时（LLM 判断失误或素材
+    过于同质）调用方应该退化成"整个 topic 当一条线索"，不在这个函数里处理兜底
+    （兜底逻辑属于组装层，不属于聚类这个纯粹的"分类判断"职责）。
+    """
+    if not articles:
+        return []
+    candidates = _select_monthly_zettel_material(articles, limit=CLUSTER_SKELETON_LIMIT)
+    label = TOPIC_LABEL.get(topic_slug, topic_slug)
+    article_lines = [f"- [[{a['doc_id']}]] {a['title']}：{a.get('gist') or '（无摘要）'}" for a in candidates]
+    user_content = f"本月「{label}」全部原文列表（共{len(candidates)}篇）：\n" + "\n".join(article_lines)
+    result = call_structured(
+        model=_INTRO_MODEL,
+        system_prompt=(
+            f"你是资讯专题报告编辑。根据给定的本月「{label}」全部原文标题与摘要，识别出"
+            "3-7条真实存在的子主题线索（同一大方向下不同的具体动态分支），每条线索关联"
+            "属于它的原文 doc_id。只能引用给定素材中真实出现的 doc_id，不能编造；划分要"
+            "基于素材实际呈现的情况，不要为了凑够数量硬拆，也不要为了省事把明显不同的"
+            "方向硬合并成一条。允许有文章不属于任何清晰的子主题，不强制覆盖全部文章。"
+        ),
+        user_content=user_content,
+        response_model=TopicClusterResult,
+    )
+    valid_ids = {a["doc_id"] for a in candidates}
+    clusters = []
+    for c in result.clusters:
+        doc_ids = [d for d in c.doc_ids if d in valid_ids]
+        if doc_ids:
+            clusters.append({"heading": c.heading, "doc_ids": doc_ids})
+    return clusters
+
+
+def _select_cluster_fulltext_ids(doc_ids: list[str], articles_by_id: dict[str, dict], limit: int) -> list[str]:
+    """从一个子主题线索的 doc_ids 里按 doc_date 降序取前 N 个（机械排序，不是"代表性"
+    判断），供该子主题"深挖细节"取全文使用。每个子主题独立挑选，不是整个 topic 共用
+    一个固定上限——子主题数越多，总深挖篇数自然越多。"""
+    ordered = sorted(doc_ids, key=lambda d: articles_by_id[d]["doc_date"], reverse=True)
+    return ordered[:limit]
+
+
+def _extract_cited_doc_ids(text_content: str, valid_ids: list[str]) -> list[str]:
+    """扫描正文实际出现的 `[[doc_id]]` wikilink，只保留候选素材里真实存在的 id——LLM
+    生成的小节正文可能只引用给定素材的一部分，不是每条素材都要建反链边；同时防御性
+    排除任何不在候选素材里的 id（`sync_document_links` 的 `to_id` 有外键约束，候选
+    素材以外的 id 保证不存在于 documents 表，写入会失败）。保持 valid_ids 的原始
+    顺序，不是 cited 集合的迭代顺序。"""
+    cited = {m.group(1) for m in _WIKILINK_ID_RE.finditer(text_content)}
+    return [doc_id for doc_id in valid_ids if doc_id in cited]
+
+
+def _build_topic_deep_dive_record(
+    topic_slug: str,
+    window_start: date,
+    window_end: date,
+    entry_count: int,
+    daily_counts: list[dict],
+    cluster_sections: list[dict],
+    fulltext_ids: list[str],
+) -> dict:
+    """组装专题月报记录（2026-07-09 深度改版二：多子主题章节结构，取代早期"整个 topic
+    一段五维度分析"）。`cluster_sections` 是 `[{heading, doc_ids, analysis}, ...]`——
+    `doc_ids` 是该子主题下全部原文 doc_id（供 link_targets 校验用），`analysis` 是该
+    子主题的五维度分析 dict（`_generate_topic_analysis` 的返回值）。报告篇幅由子主题
+    数量和素材丰富度自然决定，不是固定长度。
+    """
+    label = TOPIC_LABEL.get(topic_slug, topic_slug)
+    month_label = f"{window_start.year}年{window_start.month:02d}月"
+    title = f"{label}专题月报 · {month_label}"
+    doc_id = f"deep-dive-{topic_slug}-{window_end.isoformat()}"
+
+    # 机械拼一句子主题目录（不调 LLM——每个子主题自己的 overview 已经是 LLM 生成的深度
+    # 分析，这里只是导航性质的一句话，纯字符串拼接不需要语义判断），帮读者快速定位。
+    if cluster_sections:
+        toc = "、".join(f"「{cs['heading']}」" for cs in cluster_sections)
+        toc_line = f"本月「{label}」识别出 {len(cluster_sections)} 条主要线索：{toc}。"
+    else:
+        toc_line = _NO_CLUSTER_NOTE
+
+    sections_md = "\n\n".join(
+        f"### {cs['heading']}\n\n{_render_analysis_dimensions(cs['analysis'])}" for cs in cluster_sections
+    )
+
+    charts_section = ""
+    if daily_counts and sum(d["count"] for d in daily_counts) > 0:
+        charts_section = _build_daily_volume_bar_chart(daily_counts, title=f"{label} · 本月每日产出量") + "\n\n"
+
+    stats_section = "## 本月数据统计\n\n" + "\n".join(
+        [
+            f"- 🗓️ 窗口范围：{window_start.isoformat()} ~ {window_end.isoformat()}",
+            f"- 📰 原文总数：{entry_count}",
+            f"- 🧵 子主题数：{len(cluster_sections)}",
+            f"- 🔍 深挖原文篇数：{len(fulltext_ids)}",
+        ]
+    )
+    # 不在 body_md 里重复拼标题：title 已经是独立字段，前端详情页单独渲染
+    body_md = (
+        topic_heading(topic_slug) + "\n\n" + toc_line + "\n\n"
+        + sections_md + ("\n\n" if sections_md else "")
+        + charts_section + stats_section + "\n"
+    )
+
+    # link_targets：topic_slug 是 topic_heading() 渲染进 body_md 开头的确定性引用，直接
+    # 加入；每个子主题的五维度分析正文是 LLM 自由决定引用哪些素材的文本，只从该子主题
+    # 自己的候选素材（cs["doc_ids"]，本函数调用前已经真实查过的存在文档）里筛选正文
+    # 实际出现的 wikilink id——按子主题各自校验，不是拿全 topic 的素材池笼统校验，这样
+    # 才能保证"某条边确实来自这个子主题引用的素材"，不会张冠李戴放行别的子主题的 id。
+    link_targets = [topic_slug]
+    for cs in cluster_sections:
+        analysis = cs["analysis"]
+        analysis_text = "\n".join(
+            [analysis["deep_summary"], analysis["continuity"], analysis["cross_validation"], analysis["tensions"], analysis["emerging"]]
+        )
+        link_targets.extend(_extract_cited_doc_ids(analysis_text, cs["doc_ids"]))
+
+    return {
+        "doc_id": doc_id,
+        "doc_type": "deep_dive",
+        "title": title,
+        "doc_date": window_end,
+        "frontmatter": {
+            "title": title,
+            "doc_type": "deep_dive",
+            "topic_slug": topic_slug,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "entry_count": entry_count,
+            "cluster_count": len(cluster_sections),
+            "cluster_headings": [cs["heading"] for cs in cluster_sections],
+            "deep_dive_original_ids": list(fulltext_ids),
+        },
+        "body_md": body_md,
+        "content_hash": content_hash(body_md),
+        "tags": [],
+        "link_targets": link_targets,
+    }
+
+
+def _coerce_date(value: date | str) -> date:
+    """跨 activity 边界传递的未指定字段类型的 dict，date 字段会被 Temporal 的
+    pydantic_data_converter 退化成 ISO 字符串（M10 已踩过的坑，见
+    .claude/memory/decisions.md）。双态兼容，不假设上游一定是哪种类型。"""
+    return date.fromisoformat(value) if isinstance(value, str) else value
 
 
 # ---------------------------------------------------------------------------
@@ -339,9 +839,10 @@ def compute_deep_dive_trends_activity(window_end: date) -> dict:
 
 @activity.defn
 def generate_deep_dive_activity(payload: dict) -> dict:
-    """查 digest 素材 → 生成导语 → 组装记录 → write_activity 落库（直接内部调用，不单独
-    注册为 Temporal activity，参照 aggregate_activity/refresh_original_document_activity
-    的既有模式）。"""
+    """查 digest 素材 → 生成整体导语 → 逐个热门 topic 查 zettel/上周同期zettel/深挖全文
+    并生成深度分析（2026-07-09 深度改版，取代早期"机械 bullet 列表"）→ 组装记录 →
+    write_activity 落库（直接内部调用，不单独注册为 Temporal activity，参照
+    aggregate_activity/refresh_original_document_activity 的既有模式）。"""
     # 真实 Temporal 执行验证时发现：compute_deep_dive_trends_activity 的返回类型标注是
     # 未指定字段类型的 `-> dict`，pydantic_data_converter 在没有具体类型信息可依据时，
     # 解码这类跨 activity 边界传递的 dict 会把 date 值退化成 ISO 字符串（date.isoformat()
@@ -360,6 +861,25 @@ def generate_deep_dive_activity(payload: dict) -> dict:
 
     digests = deep_dive_list_digest_documents_in_window(window_start, window_end)
     intro = _generate_intro(trending, digests)
+
+    # 每个热门 topic 独立查素材 + 生成深度分析——含全文的素材不跨这次 activity 边界
+    # 传递（沿用 aggregate_activity 的 gRPC 4MB 教训），全部在本 activity 内完成。
+    prev_window_start, prev_window_end = _previous_weekly_window(window_start)
+    for t in trending:
+        zettels_all = topic_deep_dive_list_zettel_documents_in_window(t["slug"], window_start, window_end)
+        zettels = _select_monthly_zettel_material(zettels_all)
+        fulltext_ids = _select_fulltext_original_ids(zettels, limit=WEEKLY_TOPIC_FULLTEXT_LIMIT)
+        fulltexts = topic_deep_dive_fetch_original_fulltext(fulltext_ids)
+        previous_zettels = _select_monthly_zettel_material(
+            topic_deep_dive_list_zettel_documents_in_window(t["slug"], prev_window_start, prev_window_end)
+        )
+        t["zettels"] = zettels
+        t["fulltext_ids"] = fulltext_ids
+        length_hint = _dynamic_summary_length_hint(len(zettels), WEEKLY_SUMMARY_LENGTH_TIERS)
+        t["analysis"] = _generate_topic_analysis(
+            t["slug"], "本周", zettels, fulltexts, previous_zettels, summary_length_hint=length_hint
+        )
+
     record = _build_deep_dive_record(window_start, window_end, trending, entry_count, digests, intro, daily_counts)
     written = write_activity([record])
     activity.logger.info(
@@ -367,3 +887,117 @@ def generate_deep_dive_activity(payload: dict) -> dict:
         f"热门话题 {len(trending)} 个，覆盖 {entry_count} 篇原文，{len(digests)} 篇 digest"
     )
     return {"written": written, "doc_id": record["doc_id"], "trending_topic_count": len(trending)}
+
+
+# ---------------------------------------------------------------------------
+# activity 入口：专题月报（M11 新增）
+# ---------------------------------------------------------------------------
+
+@activity.defn
+def compute_topic_deep_dive_candidates_activity(window_start: date, window_end: date) -> list[dict]:
+    """纯查询 + 内存聚合，机械筛出上月达标的 topic 桶——只返回 slug/count 级别的小结构
+    （不含正文），供 `TopicDeepDiveMonthlyWorkflow` 决定要给哪些 topic 做 child workflow
+    fan-out。复用 `deep_dive_list_original_documents_in_window`（周报同一个查询函数，
+    参数化窗口长度即可覆盖月度窗口，不需要新写一个只是窗口更长的查询）。
+    """
+    rows = deep_dive_list_original_documents_in_window(window_start, window_end)
+    candidates = _compute_monthly_topic_candidates(rows)
+    activity.logger.info(
+        f"compute_topic_deep_dive_candidates_activity: 窗口 {window_start}~{window_end}，"
+        f"原文 {len(rows)} 篇，达标 topic {len(candidates)} 个"
+    )
+    return candidates
+
+
+@activity.defn
+def compute_topic_deep_dive_stats_activity(params: TopicDeepDiveParams) -> dict:
+    """单个达标 topic 的统计数字（entry_count/逐日分布）+ 子主题聚类结果，不含正文——
+    含全文的深挖素材放到 generate_topic_deep_dive_activity 内部重新查询，不经过这次
+    activity 边界，规避 aggregate_activity 曾经真实撞过的 gRPC 4MB 教训。聚类只需要
+    title+gist（体积小），跟统计数字共用同一次查询结果，不用另开一次 activity
+    （2026-07-09 深度改版二新增聚类步骤，见 .claude/memory/decisions.md）。0 条有效
+    聚类线索时退化成"整个 topic 当一条线索"，不能因为聚类失败就让报告开天窗。
+    """
+    rows = topic_deep_dive_list_original_documents_in_window(
+        params.topic_slug, params.window_start, params.window_end
+    )
+    daily_counts = _compute_daily_counts(rows, params.window_start, params.window_end)
+    clusters = _cluster_topic_articles(params.topic_slug, rows)
+    if not clusters and rows:
+        clusters = [
+            {
+                "heading": TOPIC_LABEL.get(params.topic_slug, params.topic_slug),
+                "doc_ids": [r["doc_id"] for r in rows],
+            }
+        ]
+    activity.logger.info(
+        f"compute_topic_deep_dive_stats_activity: {params.topic_slug} 窗口 "
+        f"{params.window_start}~{params.window_end}，原文 {len(rows)} 篇，子主题 {len(clusters)} 条"
+    )
+    return {
+        "topic_slug": params.topic_slug,
+        "window_start": params.window_start,
+        "window_end": params.window_end,
+        "entry_count": len(rows),
+        "daily_counts": daily_counts,
+        "clusters": clusters,
+    }
+
+
+@activity.defn
+def generate_topic_deep_dive_activity(payload: dict) -> dict:
+    """逐个子主题查全文深挖素材（CLUSTER_FULLTEXT_LIMIT 篇/子主题，不是整个 topic 共用
+    一个固定上限）+ 查上个月同 topic 原文（延续性对比素材）→ 逐子主题生成深度分析 →
+    组装多章节记录 → write_activity 落库，全部在同一个 activity 内完成——避免含全文
+    素材跨 activity 边界传递，重演 aggregate_activity 已经踩过的 gRPC 4MB 教训
+    （2026-07-09 深度改版二：从"单个 topic 一段五维度分析"改为"逐子主题多段深度分析"，
+    见 .claude/memory/decisions.md）。
+    """
+    topic_slug = payload["topic_slug"]
+    window_start = _coerce_date(payload["window_start"])
+    window_end = _coerce_date(payload["window_end"])
+    entry_count = payload["entry_count"]
+    daily_counts = payload["daily_counts"]
+    clusters = payload["clusters"]
+
+    # 重新查一次该 topic 本月全部原文（含 gist），供子主题深挖时取 title/gist 素材——
+    # 不跨 activity 边界传全文，stats activity 只传了 clusters 的 heading/doc_ids 结构。
+    articles = topic_deep_dive_list_original_documents_in_window(topic_slug, window_start, window_end)
+    articles_by_id = {a["doc_id"]: a for a in articles}
+
+    prev_window_start, prev_window_end = _previous_monthly_window(window_start)
+    previous_materials = _select_monthly_zettel_material(
+        topic_deep_dive_list_original_documents_in_window(topic_slug, prev_window_start, prev_window_end)
+    )
+
+    cluster_sections = []
+    all_fulltext_ids: list[str] = []
+    for cluster in clusters:
+        doc_ids = [d for d in cluster["doc_ids"] if d in articles_by_id]
+        if not doc_ids:
+            continue
+        cluster_materials = [articles_by_id[d] for d in doc_ids]
+        fulltext_ids = _select_cluster_fulltext_ids(doc_ids, articles_by_id, CLUSTER_FULLTEXT_LIMIT)
+        fulltexts = topic_deep_dive_fetch_original_fulltext(fulltext_ids)
+        length_hint = _dynamic_summary_length_hint(len(cluster_materials), MONTHLY_SUMMARY_LENGTH_TIERS)
+        analysis = _generate_topic_analysis(
+            topic_slug, "本月", cluster_materials, fulltexts, previous_materials,
+            summary_length_hint=length_hint,
+        )
+        cluster_sections.append({"heading": cluster["heading"], "doc_ids": doc_ids, "analysis": analysis})
+        all_fulltext_ids.extend(fulltext_ids)
+
+    record = _build_topic_deep_dive_record(
+        topic_slug, window_start, window_end, entry_count, daily_counts, cluster_sections, all_fulltext_ids
+    )
+    written = write_activity([record])
+    activity.logger.info(
+        f"generate_topic_deep_dive_activity: {record['doc_id']} 写入完成，"
+        f"子主题 {len(cluster_sections)} 条，深挖原文合计 {len(all_fulltext_ids)} 篇"
+    )
+    return {
+        "written": written,
+        "doc_id": record["doc_id"],
+        "topic_slug": topic_slug,
+        "cluster_count": len(cluster_sections),
+    }

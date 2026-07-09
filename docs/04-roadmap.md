@@ -230,6 +230,11 @@ M1 独立验收，前一个不达标不进入下一个；**M2-M4 从路线图调
 **触发条件（已达成）**：新系统 `documents` 表 `doc_type='digest'` 积累足够天数历史（沿用旧系统"≥7 天"门槛作参考起点）。2026-07-09 核查已有 12 天连续历史，正式启动实现。
 **实现**：独立 Temporal Schedule（每周一 09:00 Asia/Shanghai），机械统计"热门 topic"趋势（不重新聚类，复用既有 topic_slug）+ 1 次 LLM 调用生成周叙事导语，新增独立 `doc_type='deep_dive'`，完全只读输入 + 单条新增输出，不改写任何既有文档。详见 [`docs/milestones/M10-deep-dive.md`](./milestones/M10-deep-dive.md)。
 
+### M11 — Topic Deep Dive：专题月报（净新设计，M10 的正交扩展）
+**背景**：M10 周报是"全部 10 个 topic 桶 × 7 天窗口"的横向广度扫描；用户提出希望增加"固定 1 个 topic 桶 × 自然月窗口"的纵向深度扫描，结合 topic 分桶 + zettel 原子笔记 + 深挖 original 全文，产出如"模型发布专题月报""应用案例专题月报"这类更聚焦的深度内容。两者共享同一套设计哲学（机械统计决定"选什么"，LLM 只负责"怎么讲"），互不依赖、互为正交维度。
+**触发条件**：不额外设数据量门槛（M10 周报同一批数据已充分验证过链路），2026-07-09 走完完整设计确认流程（对话式设计提案 + 3 处关键决策点用户显式选择）后直接启动。
+**实现**：新增独立 Temporal Schedule（每月 1 号 09:00 Asia/Shanghai，回看上一个完整自然月），先机械统计上月各 topic 桶 `total_count`/`active_days` 双门槛（`>=8` 且 `>=4`）筛出达标桶，按达标 topic 做 child workflow fan-out（仿 `EnrichArticleWorkflow` 的 per-unit fan-out 模式，某桶生成失败不影响其余桶）；每个 child 内部两段 activity（仿 `DeepDiveWorkflow` 结构）：先只返回统计数字的 stats activity，再在同一个 activity 内重新查询该 topic 本月全部 zettel（骨架素材，超过 30 条机械截断取最新 30 条）+ 反查最多 10 篇 original 全文（深挖细节，按 doc_date 降序取最新 10 篇）+ 全量数量/日期分布（热度背景）、调 1 次结构化 LLM（新增 `TopicDeepDiveNarrative` schema：导语 + 2-4 个子叙事小节）、组装、落库（避免含全文素材跨 activity 边界传递，重演 gRPC 4MB 教训）。复用既有 `doc_type='deep_dive'`，**用 `topic_slug` 字段有无天然区分月报/周报**（不新增 `scope` 字段，周报历史记录零改动），前端 `doc-type.ts`/`LuminaBacklinks.astro` 因此零改动，只需列表页/详情页做条件渲染适配两种形态。详见 [`docs/milestones/M11-topic-deep-dive.md`](./milestones/M11-topic-deep-dive.md)。
+
 ---
 
 ## 5. 待决问题索引

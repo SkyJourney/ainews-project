@@ -73,3 +73,7 @@ M7 生产化收尾讨论时用户提出"这个后续做成独立 Temporal 工作
 - **图表配色**：mermaid 默认主题 8 个饼图色彼此明度/饱和度接近，8 个热门话题挤在一起区分度低。`MermaidRenderer.astro` 改用 `theme: 'base'` + 自定义 `themeVariables`（改自 Tableau 10 的高区分度定性调色板，饼图/柱状图/象限图数据点统一复用同一套色）。**过程中发现之前"站内没有深色模式"的判断是错的**——重新核查 `frontend/src/lib/theme-toggle-client.ts`/`tokens.css` 的 `[data-theme='dark']` 覆盖，确认站点确实有真实的深色模式切换，之前判断依据的是一次不完整的 grep 结果；顺手把 `mermaid.initialize()` 也改成读取 `document.documentElement.dataset.theme` 动态选取明暗两套文字/线条/象限背景色（数据本身的调色板两种主题下复用不变）。**排查配色不生效的过程走了弯路**：一开始在独立的 Playwright 沙盒页面里用 `esm.sh` CDN 动态 import mermaid 测试自定义 `themeVariables`，反复验证 `pie1`/`primaryColor` 等变量始终不生效（配置对象本身能读到正确值，但渲染出的 SVG 颜色岿然不动）——怀疑是 CDN 重新打包 mermaid 内部图表类型的懒加载 chunk 时破坏了主题配置的模块间共享状态。改为直接在真实项目环境（Vite 打包）里改完 `MermaidRenderer.astro` 重建镜像验证，一次就确认配色完全生效，说明沙盒环境不能代表生产环境下的构建行为，及时切换验证方式没有继续在错误的路径上打转。
 
 **真实验证**：24 篇代表文章 gist 回填后加粗标记从 11 处增至 112 处；重新触发 `DeepDiveWorkflow` 刷新报告；**用 Playwright 直接从真实渲染出的 SVG 提取 `fill` 属性核对**（不是肉眼判断"看起来是不是更好看"）——饼图 8 个扇形分别对应调色板 8 种颜色、象限图 4 个背景区域对应 4 种柱状图未涉及的浅色调、象限点与柱状图主色一致，浏览器控制台 0 报错。
+
+## 追加四：每个热门 topic 小节接入深度分析引擎，取代机械 bullet 列表（2026-07-09，M11 期间同日）
+
+M11（专题月报）首版真实产出后用户反馈"太浅薄，像罗列文章"，追溯发现周报的每个热门 topic 小节（`_render_trend_section`）从 M10 上线以来就是**纯机械 bullet 列表，全程没有 LLM 参与**，是这个观感的直接根因之一。这次重写是周报+月报共享的同一次改动，完整设计与真实验证记录在 [`M11-topic-deep-dive.md`「追加：深度叙事引擎重写」](./M11-topic-deep-dive.md#追加深度叙事引擎重写周报月报共享五维度分析--关系图2026-07-09同日)，不重复展开。周报侧的关键变化：`generate_deep_dive_activity` 现在给每个热门 topic 循环调用共享的 `_generate_topic_analysis`（五维度深度分析 + 关系图，深挖全文上限 5 篇），`DeepDiveWorkflow` 超时按热门话题数动态估算；原机械列表降级为小节末尾"参考文章"辅助链接。
