@@ -137,6 +137,35 @@ def needs_translation(title: str, body_md: str) -> bool:
     return not already_chinese
 
 
+def _hard_slice_oversized_paragraph(para: str, max_chars: int) -> list[str]:
+    """段落本身超过 max_chars 时的硬切兜底，按字符数切片，但对围栏代码块（```...```）
+    做特殊处理：教程类文章常见单个代码块本身就超过 max_chars（2026-07-10 真实批次
+    发现：NVIDIA Cosmos 教程有 5 个代码块 3000-5900 字符，且代码块和后续说明文字
+    之间没有空行分隔，两者被当成同一个"段落"），盲目按字符数切开会把开合围栏标记
+    切散到不同分块里——每个切出来的子块单独看都不再是"完整配对"的代码块，
+    `_strip_code_and_links` 的正则要求围栏成对出现，识别不出来的话，大段英文代码
+    会被计入翻译完整性校验的 CJK 占比分母，导致代码密集的文章无论重跑多少次都会
+    被误判翻译不完整——这不是运气问题，是切分环节本身破坏了后续所有校验的前提
+    （见 .claude/memory/decisions.md）。
+
+    做法：逐片扫描围栏标记数量的奇偶性，跟踪"进入这一片时是否已经处于未闭合的围栏
+    内部"，在片首补一个开启围栏、片尾补一个闭合围栏，让每个切出来的子块自身都是
+    围栏配对完整的。不含任何围栏标记的普通超长段落（如超长参考文献列表）不受影响，
+    奇偶判断全程为 False，行为跟原来的纯字符切片完全一致。
+    """
+    raw_slices = [para[i : i + max_chars] for i in range(0, len(para), max_chars)]
+    result: list[str] = []
+    inside_fence = False
+    for raw in raw_slices:
+        piece = f"```\n{raw}" if inside_fence else raw
+        toggled = raw.count("```") % 2 == 1
+        inside_fence = inside_fence != toggled
+        if inside_fence:
+            piece = f"{piece}\n```"
+        result.append(piece)
+    return result
+
+
 def _chunk_paragraphs(body_md: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     """按段落贪心分块，避免长文本单次撑爆上下文（用户在 M1 明确要求的分段翻译）。
 
@@ -146,7 +175,8 @@ def _chunk_paragraphs(body_md: str, max_chars: int = MAX_CHUNK_CHARS) -> list[st
     这类超大分块喂给翻译模型会导致输出被 max_tokens（8000）截断，Instructor 直接
     抛 IncompleteOutputException 中断整个 activity（真实批次实测触发）。硬切虽然可能
     切在句子中间，但只用于这种"没有更细粒度可分割"的极端输入，比让整个翻译流程崩溃
-    要好得多。
+    要好得多。硬切具体逻辑见 `_hard_slice_oversized_paragraph`（对围栏代码块做了
+    额外保护，避免破坏下游的代码识别）。
     """
     paragraphs = body_md.split("\n\n")
     chunks: list[str] = []
@@ -159,7 +189,7 @@ def _chunk_paragraphs(body_md: str, max_chars: int = MAX_CHUNK_CHARS) -> list[st
                 chunks.append("\n\n".join(current))
                 current = []
                 current_len = 0
-            chunks.extend(para[i : i + max_chars] for i in range(0, len(para), max_chars))
+            chunks.extend(_hard_slice_oversized_paragraph(para, max_chars))
             continue
 
         para_len = len(para) + 2
@@ -751,6 +781,23 @@ def _strip_code_and_links(text: str) -> str:
     return re.sub(re.escape(IMAGE_URL_PREFIX) + r"\S+", "", text)
 
 
+# 原文整体代码占比超过这个阈值，判定为结构性的"代码实现教程"而非"资讯文章"——这类
+# 内容天然自然语言正文稀少（真实样本对比：NVIDIA Cosmos 教程代码占比 80.2%，普通
+# 论文/教程通常在 3% 以下），完整性校验大概率会持续失败，反复重跑也无法改善，不是
+# 翻译质量问题（2026-07-10 真实批次发现，见 .claude/memory/decisions.md）。达到阈值
+# 时降级提示改用更诚实的"原文结构复杂"措辞，明确告诉读者这不是翻译失败，不要用
+# 常规的"翻译完整性机械校验未通过"措辞制造"翻译没做好"的误导印象。
+_HIGH_CODE_FRACTION_THRESHOLD = 0.35
+
+
+def _code_fraction(text: str) -> float:
+    """原文里被 ``` 代码块/URL 占据的字符比例。"""
+    if not text:
+        return 0.0
+    stripped = _strip_code_and_links(text)
+    return 1 - len(stripped) / len(text)
+
+
 # 判断一行是不是"数据行/图表提取噪声"（标识符+数字表格、图表转 Markdown 产生的字符画），
 # 而非需要翻译的自然语言正文。判据：这一行里找不到长度>=3 的连续拉丁字母、或长度>=2 的
 # 连续中日韩文字——真正的自然语言句子几乎不可能连一个这样的片段都没有（诊断真实批次数据后
@@ -1201,21 +1248,35 @@ def translate_activity(title: str, body_md: str) -> dict:
                 f"translate_activity 机械校验未通过但复审判定翻译完整（专有名词/数据密度导致误判）：{title[:50]}"
             )
         else:
+            # 原文本身结构性代码占比过高时（教程类文章常见），完整性校验大概率会
+            # 持续失败且无法靠重试改善——不是翻译质量问题，提示措辞相应改用更诚实
+            # 的"原文结构复杂"说法，不要用"翻译完整性机械校验未通过"这类容易让读者
+            # 误以为是翻译没做好的措辞（2026-07-10 真实批次发现，见
+            # .claude/memory/decisions.md）。
+            is_code_heavy = _code_fraction(body_md) >= _HIGH_CODE_FRACTION_THRESHOLD
             if len(translated_chunks) > 2:
                 # 唯一允许的降级路径：保留首尾分块（近似摘要/引言 + 结论）完整翻译，
                 # 中间占位说明——绝不悄悄标记为翻译完成（04 §2.4 硬约束）。尾块用
                 # _select_fallback_tail_chunk 跳过纯参考文献分块，找不到时宁可不展示
                 # 尾块（2026-07-10 真实批次质量核查发现的修复，见
                 # .claude/memory/decisions.md）。
-                fallback_parts = [
-                    translated_chunks[0],
-                    "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）",
-                ]
+                placeholder = (
+                    "（原文包含大量代码/技术实现内容，机器翻译难以逐段覆盖，完整代码"
+                    "请查阅原文链接）"
+                    if is_code_heavy
+                    else "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）"
+                )
+                fallback_parts = [translated_chunks[0], placeholder]
                 tail_chunk = _select_fallback_tail_chunk(translated_chunks)
                 if tail_chunk is not None:
                     fallback_parts.append(tail_chunk)
                 translated_body = "\n\n".join(fallback_parts)
-            completeness_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
+            completeness_notice = (
+                "原文结构复杂（大量代码/技术实现内容），机器翻译难以完整覆盖，"
+                "已展示开头与结尾内容，建议查看原文获取完整教程"
+                if is_code_heavy
+                else "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
+            )
             fallback_notice = f"{fallback_notice}；{completeness_notice}" if fallback_notice else completeness_notice
             activity.logger.warning(f"translate_activity 完整性校验未通过：{title[:50]}")
 

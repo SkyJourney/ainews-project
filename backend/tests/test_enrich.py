@@ -124,6 +124,26 @@ def test_select_fallback_tail_chunk_returns_none_when_all_trailing_chunks_are_re
     assert enrich._select_fallback_tail_chunk(chunks) is None
 
 
+# ---------------------------------------------------------------------------
+# _code_fraction：判断原文是不是结构性的"代码实现教程"（而非"资讯文章"），高于
+# 阈值时降级提示应该用更诚实的"原文结构复杂"措辞，而不是"翻译完整性机械校验未
+# 通过"（2026-07-10 真实批次发现，见 .claude/memory/decisions.md）。
+# ---------------------------------------------------------------------------
+
+def test_code_fraction_high_for_code_heavy_tutorial():
+    text = "简介一句话。\n\n" + "```\n" + ("x = 1\n" * 200) + "```\n\n结论一句话。"
+    assert enrich._code_fraction(text) >= enrich._HIGH_CODE_FRACTION_THRESHOLD
+
+
+def test_code_fraction_low_for_normal_prose():
+    text = "这是一篇正常的中文文章，讲述了实验结果和分析过程，没有任何代码内容。" * 5
+    assert enrich._code_fraction(text) < enrich._HIGH_CODE_FRACTION_THRESHOLD
+
+
+def test_code_fraction_empty_text_is_zero():
+    assert enrich._code_fraction("") == 0.0
+
+
 def test_cjk_ratio_excluding_code_strips_code_blocks_and_image_refs():
     # 注意：_is_cjk_char 的码位范围不含中文全角标点（如"。"），这里特意不用标点收尾，
     # 断言才能精确等于 1.0，避免测试对既有 _is_cjk_char 判定边界做出错误假设。
@@ -325,6 +345,47 @@ def test_chunk_paragraphs_normal_case_unaffected():
     text = "第一段。\n\n第二段。\n\n第三段。"
     chunks = enrich._chunk_paragraphs(text, max_chars=100)
     assert chunks == [text]  # 都在上限内，仍然合并成一块，跟硬切逻辑加入前行为一致
+
+
+# ---------------------------------------------------------------------------
+# _hard_slice_oversized_paragraph：围栏代码块超过 max_chars 时，硬切不能破坏
+# ``` 配对结构，否则 _strip_code_and_links 在任何一个切片里都识别不出这是代码
+# （2026-07-10 真实批次发现：NVIDIA Cosmos 教程有代码块超过 2000 字符，翻译
+# 完整性校验因此必然失败，见 .claude/memory/decisions.md）。
+# ---------------------------------------------------------------------------
+
+def _count_fences(text: str) -> int:
+    return text.count("```")
+
+
+def test_hard_slice_oversized_paragraph_keeps_fences_balanced_in_every_piece():
+    code_body = "x = 1\n" * 400  # 远超 max_chars，且不含任何空行，模拟真实超长代码块
+    para = f"```python\n{code_body}```\n这段代码之后紧跟没有空行分隔的说明文字。"
+    pieces = enrich._hard_slice_oversized_paragraph(para, max_chars=200)
+    assert len(pieces) > 1  # 确实被切成了多片，不是退化成单片
+    for piece in pieces:
+        assert _count_fences(piece) % 2 == 0  # 每一片自身围栏都必须成对
+
+
+def test_hard_slice_oversized_paragraph_stripped_pieces_have_no_leftover_code_dragging_cjk_ratio():
+    code_body = "def f(x):\n    return x + 1\n" * 100
+    para = f"```\n{code_body}```\n后续说明。"
+    pieces = enrich._hard_slice_oversized_paragraph(para, max_chars=300)
+    # 每一片经过 _strip_code_and_links 清洗后，代码正文应该被完全排除，不会拖累
+    # 完整性校验的 CJK 占比分母——这是这个修复要解决的真实问题。
+    for piece in pieces:
+        stripped = enrich._strip_code_and_links(piece)
+        assert "def f" not in stripped
+        assert "return x" not in stripped
+
+
+def test_hard_slice_oversized_paragraph_without_fences_behaves_like_before():
+    # 不含围栏标记的超长段落（如超长参考文献列表）行为跟原来的纯字符切片完全一致，
+    # 不受这次修复影响。
+    huge_paragraph = "x" * 5000
+    pieces = enrich._hard_slice_oversized_paragraph(huge_paragraph, max_chars=100)
+    assert all(len(p) <= 100 for p in pieces)
+    assert "".join(pieces) == huge_paragraph
 
 
 # ---------------------------------------------------------------------------
