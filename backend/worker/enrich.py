@@ -788,6 +788,57 @@ def _is_mostly_noise(text: str) -> bool:
     return noise_count / len(lines) >= _MOSTLY_NOISE_LINE_RATIO
 
 
+# 判断一行是不是"参考文献条目"。学术论文常见两种互不重叠的引用风格，缺一种都会
+# 漏判——"作者 [年份]"（如 `Zilberstein [1996]`）与"编号制"（如 `[37] Author:
+# Title (2020)`，方括号里是引用序号不是年份，通常 1-3 位数字）；另外 doi 常见
+# "doi:" 和 "https://doi.org/..." 两种写法，圆括号包裹的 4 位年份"(2020)"则是
+# 几乎所有引用风格共有的行尾特征。2026-07-10 真实重跑验证时发现：第一版正则只
+# 覆盖了作者年份制，`FedCVESA` 这篇论文恰好是编号制，尾块选择器完全没识别出来，
+# 是靠真实重跑才暴露的，光看代码看不出这个缺口（见 .claude/memory/decisions.md）。
+_REFERENCE_ENTRY_LINE_RE = re.compile(
+    r"\[\d{4}[a-z]?\]|\[\d{1,3}\]|doi\s*:|doi\.org|arxiv|\(\d{4}\)", re.IGNORECASE
+)
+_ET_AL_RE = re.compile(r"等人|et al\.?", re.IGNORECASE)
+
+
+def _is_reference_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped == "-":
+        return False
+    return bool(_REFERENCE_ENTRY_LINE_RE.search(stripped) or _ET_AL_RE.search(stripped))
+
+
+# 参考文献列表阈值比 _MOSTLY_NOISE_LINE_RATIO 低很多——引用条目常见"作者[年份]"这一行
+# 之后紧跟不带任何标记的书名/期刊/页码行，逐行标记密度天然到不了 95%，但整体结构一望
+# 而知是参考文献，真实样本统计密度在 40% 左右，0.3 留出安全余量。
+_MOSTLY_REFERENCES_LINE_RATIO = 0.3
+
+
+def _is_mostly_references(text: str) -> bool:
+    """整块内容几乎是参考文献列表（而非结论/正文），不适合当作降级展示时的"尾块"——
+    单独裸露的列表分隔符"-"行不计入分母，也不算引用标记本身。
+    """
+    lines = [line for line in text.split("\n") if line.strip() and line.strip() != "-"]
+    if not lines:
+        return False
+    ref_count = sum(1 for line in lines if _is_reference_line(line))
+    return ref_count / len(lines) >= _MOSTLY_REFERENCES_LINE_RATIO
+
+
+def _select_fallback_tail_chunk(chunks: list[str]) -> str | None:
+    """降级展示只保留首尾分块时，从后往前找一个不是"几乎全是参考文献"的分块当"尾块"
+    （近似结论）——学术论文的最后几个分块经常是参考文献而不是结论，盲目取
+    chunks[-1] 会把接近零信息量的引用列表当结论展示给读者（2026-07-10 真实批次质量
+    核查发现的真实案例）。chunks[0] 已经单独用作头块，不在候选范围内；从尾部往前的
+    分块如果全部都是参考文献（没有找到合适的尾块），返回 None——此时宁可不展示尾块，
+    也不要硬塞一段引用列表冒充结论。
+    """
+    for chunk in reversed(chunks[1:]):
+        if not _is_mostly_references(chunk):
+            return chunk
+    return None
+
+
 def _cjk_ratio_excluding_code(text: str) -> float:
     stripped = _strip_code_and_links(text)
     stripped = _strip_data_and_noise_lines(stripped)
@@ -1152,14 +1203,18 @@ def translate_activity(title: str, body_md: str) -> dict:
         else:
             if len(translated_chunks) > 2:
                 # 唯一允许的降级路径：保留首尾分块（近似摘要/引言 + 结论）完整翻译，
-                # 中间占位说明——绝不悄悄标记为翻译完成（04 §2.4 硬约束）。
-                translated_body = "\n\n".join(
-                    [
-                        translated_chunks[0],
-                        "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）",
-                        translated_chunks[-1],
-                    ]
-                )
+                # 中间占位说明——绝不悄悄标记为翻译完成（04 §2.4 硬约束）。尾块用
+                # _select_fallback_tail_chunk 跳过纯参考文献分块，找不到时宁可不展示
+                # 尾块（2026-07-10 真实批次质量核查发现的修复，见
+                # .claude/memory/decisions.md）。
+                fallback_parts = [
+                    translated_chunks[0],
+                    "（原文中间部分因翻译完整性校验未通过，未逐段翻译，可通过原文链接查阅完整内容）",
+                ]
+                tail_chunk = _select_fallback_tail_chunk(translated_chunks)
+                if tail_chunk is not None:
+                    fallback_parts.append(tail_chunk)
+                translated_body = "\n\n".join(fallback_parts)
             completeness_notice = "翻译完整性机械校验未通过，仅完整翻译首尾部分，其余章节保留原文提示"
             fallback_notice = f"{fallback_notice}；{completeness_notice}" if fallback_notice else completeness_notice
             activity.logger.warning(f"translate_activity 完整性校验未通过：{title[:50]}")

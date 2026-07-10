@@ -28,6 +28,102 @@ def test_is_mostly_noise_requires_high_ratio():
     assert enrich._is_mostly_noise(all_data) is True
 
 
+def test_is_reference_line_detects_bracket_year_doi_arxiv_and_et_al():
+    assert enrich._is_reference_line("Zilberstein [1996]") is True
+    assert enrich._is_reference_line("Yang 等人 [2004]") is True
+    assert enrich._is_reference_line("Smith et al. [2020]") is True
+    assert enrich._is_reference_line("doi: 10.1287/trsc.1030.0068。") is True
+    assert enrich._is_reference_line("arXiv preprint arXiv:2001.02610 (2020)") is True
+
+
+def test_is_reference_line_detects_numbered_citation_style():
+    # 2026-07-10 真实重跑验证时发现：FedCVESA 这篇论文用编号制引用（[37] Author:
+    # Title (Year)），跟作者-年份制是完全不同的格式，第一版正则漏判，靠真实重跑才
+    # 暴露（见 .claude/memory/decisions.md）。
+    assert enrich._is_reference_line(
+        "[37] Xie, C., Huang, K., Chen, P.Y., Li, B.: DBA：针对联邦学习的分布式后门攻击。发表于：国际学习表征会议 (2020)"
+    ) is True
+    assert enrich._is_reference_line(
+        "[39] Yang, X., Luo, W., Zhen, L.: 通过深度学习模型的后门误分类触发器进行数据泄露攻击。https://doi.org/10.1109/ICDIS55630.2022.00017"
+    ) is True
+    assert enrich._is_reference_line("hms. CoRR abs/1708.07747 (2017)") is True
+
+
+def test_is_reference_line_normal_prose_and_bullet_separator_are_not_references():
+    assert enrich._is_reference_line("这是一句正常的中文正文，讲述实验结果。") is False
+    assert enrich._is_reference_line("-") is False
+    assert enrich._is_reference_line("   ") is False
+
+
+def test_is_mostly_references_detects_real_bibliography_sample():
+    # 取自 2026-07-10 真实批次里"Latency-Aware Bid Acceptance"论文降级后的尾块内容。
+    bibliography = "\n".join(
+        [
+            "农业部，农业营销服务局 [2026] 美国农业部，农业营销服务局。特产作物全国卡车运价报告 (fvwtrk)，2026年。",
+            "-",
+            "Viola and Jones [2001]",
+            "Paul Viola 和 Michael Jones。",
+            "使用简单特征的增强级联进行快速目标检测。",
+            "-",
+            "Yang 等人 [2004]",
+            "《Transportation Science》，38(2):135–148，2004年。doi: 10.1287/trsc.1030.0068。",
+        ]
+    )
+    assert enrich._is_mostly_references(bibliography) is True
+
+
+def test_is_mostly_references_detects_numbered_citation_style_sample():
+    # 取自 2026-07-10 真实批次里 FedCVESA 论文降级后的尾块内容——第一版正则漏判的
+    # 真实样本，回归锁定。
+    bibliography = "\n".join(
+        [
+            "hms. CoRR abs/1708.07747 (2017)",
+            "- [37] Xie, C., Huang, K., Chen, P.Y., Li, B.: DBA：针对联邦学习的分布式后门攻击。发表于：国际学习表征会议 (2020)",
+            "- [38] Yang, Q., Liu, Y., Chen, T., Tong, Y.: 联邦机器学习：概念与应用。ACM智能系统与技术交易 10(2), 1–19 (2019)",
+            "- [39] Yang, X., Luo, W., Zhang, L.: 通过深度学习模型的后门误分类触发器进行数据泄露攻击。https://doi.org/10.1109/ICDIS55630.2022.00017 (2022)",
+        ]
+    )
+    assert enrich._is_mostly_references(bibliography) is True
+
+
+def test_is_mostly_references_normal_conclusion_is_not_references():
+    conclusion = "\n".join(
+        [
+            "本研究中的所有实验均使用NVIDIA H100 Hopper 80GB GPU以及运行时可用的最新稳定PyTorch版本进行。",
+            "我们估计本研究的预训练、后训练、消融实验和评估的GPU小时使用量总计约为20万GPU小时。",
+        ]
+    )
+    assert enrich._is_mostly_references(conclusion) is False
+
+
+def test_select_fallback_tail_chunk_skips_trailing_reference_chunk():
+    bibliography_chunk = "\n".join(
+        ["Zilberstein [1996]", "Shlomo Zilberstein。", "在智能系统中使用随时算法。", "doi: 10.1234/abc。"]
+    )
+    conclusion_chunk = "本文提出的方法在多个基准上取得了最优结果，未来工作将探索更大规模的部署场景。"
+    chunks = ["摘要：本文提出了一种新方法。", "中间正文分块。", conclusion_chunk, bibliography_chunk]
+    assert enrich._select_fallback_tail_chunk(chunks) == conclusion_chunk
+
+
+def test_select_fallback_tail_chunk_skips_numbered_style_reference_chunk():
+    numbered_bibliography_chunk = "\n".join(
+        [
+            "- [37] Xie, C.: DBA：针对联邦学习的分布式后门攻击 (2020)",
+            "- [38] Yang, Q.: 联邦机器学习：概念与应用 (2019)",
+        ]
+    )
+    conclusion_chunk = "综上，本文提出的方法能够高效移除联邦学习中的特定训练数据。"
+    chunks = ["摘要：本文提出了一种新方法。", conclusion_chunk, numbered_bibliography_chunk]
+    assert enrich._select_fallback_tail_chunk(chunks) == conclusion_chunk
+
+
+def test_select_fallback_tail_chunk_returns_none_when_all_trailing_chunks_are_references():
+    bibliography_chunk_1 = "\n".join(["Zilberstein [1996]", "在智能系统中使用随时算法。", "doi: 10.1234/abc。"])
+    bibliography_chunk_2 = "\n".join(["Yang 等人 [2004]", "《Transportation Science》，2004年。doi: 10.5/def。"])
+    chunks = ["摘要：本文提出了一种新方法。", bibliography_chunk_1, bibliography_chunk_2]
+    assert enrich._select_fallback_tail_chunk(chunks) is None
+
+
 def test_cjk_ratio_excluding_code_strips_code_blocks_and_image_refs():
     # 注意：_is_cjk_char 的码位范围不含中文全角标点（如"。"），这里特意不用标点收尾，
     # 断言才能精确等于 1.0，避免测试对既有 _is_cjk_char 判定边界做出错误假设。
