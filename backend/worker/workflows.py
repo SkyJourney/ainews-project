@@ -41,7 +41,7 @@ with workflow.unsafe.imports_passed_through():
         record_source_health_activity,
     )
     from worker.filter import filter_activity
-    from worker.schemas import Entry, EnrichArticleParams, PipelineParams, TopicDeepDiveParams
+    from worker.schemas import DeepDiveParams, Entry, EnrichArticleParams, PipelineParams, TopicDeepDiveParams
 
 
 @workflow.defn
@@ -372,15 +372,21 @@ class DeepDiveWorkflow:
 
     比 ArxivFulltextBackfillWorkflow 更彻底的"完全解耦"——只读 original/digest，不改写
     任何既有 Topic/Daily/Digest/Original/Zettel 文档，只新增这一条记录。
+
+    `params.window_end` 可选（2026-07-20 新增，见 decisions.md「周报素材来源...」附近
+    的回补记录）：留空时按 Schedule 触发时间兜底计算当周窗口，手动回补历史某一周报告时
+    可显式指定，`doc_id=deep-dive-{window_end}` 天然 upsert 覆盖同一条历史记录，不会
+    产生重复文档。
     """
 
     @workflow.run
-    async def run(self) -> dict:
+    async def run(self, params: DeepDiveParams) -> dict:
         default_retry = RetryPolicy(maximum_attempts=3)
-        # workflow 代码内必须用确定性时间源，date.today() 只能留在 activity 内部——
-        # 沿用 AInewsPipelineWorkflow 用 start_time 保证 replay 确定性的既定模式。
-        # 09:00 Asia/Shanghai = 01:00 UTC，.date() 直接取不会跨日翻转。
-        window_end = workflow.info().start_time.date() - timedelta(days=1)
+        # window_end 可选，留空时用确定性时间源兜底——date.today() 只能留在 activity
+        # 内部，沿用 AInewsPipelineWorkflow 用 start_time 保证 replay 确定性的既定模式。
+        # 09:00 Asia/Shanghai = 01:00 UTC，.date() 直接取不会跨日翻转。手动回补历史某一
+        # 周报告时可显式传入 window_end（仿 PipelineParams.batch_id 的既定模式）。
+        window_end = params.window_end or workflow.info().start_time.date() - timedelta(days=1)
 
         trends = await workflow.execute_activity(
             compute_deep_dive_trends_activity,
@@ -388,16 +394,23 @@ class DeepDiveWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=default_retry,
         )
-        # generate_deep_dive_activity 现在给每个热门 topic 单独做一次深度分析 LLM 调用
-        # （2026-07-09 深度改版），不再是 1 次导语调用就完事——超时按热门话题数动态估算
-        # （仿 translate_activity 按分块数动态估算超时的既定模式），基础 120s 覆盖导语+
-        # 写库，每个热门话题（最多 MAX_TRENDING_TOPICS=8 个）额外估 150s。
+        # generate_deep_dive_activity 现在给每个热门 topic 先做 1 次子主题聚类 LLM 调用，
+        # 再给每个子主题各做 1 次深度分析 LLM 调用（2026-07-20 改版：素材来源从 zettel
+        # 反查改为全部原文子主题聚类，与月报同构，见 .claude/memory/decisions.md）——
+        # 子主题数由 LLM 聚类结果决定（prompt 要求 3-7 条线索），调用方无法在触发这次
+        # activity 前精确预估总调用次数，固定"每 topic 一次分析"的旧公式已经在真实
+        # 8-topic 批次上撞过 start_to_close 超时（2026-07-20 真实事故）。改用 activity
+        # 内部逐子主题上报心跳（仿 translate_activity 的既定模式）+ 宽裕的 worst-case
+        # 兜底超时：每个热门 topic 预留 90s 聚类 + 最多 7 条线索 × 150s 分析，
+        # heartbeat_timeout 负责快速发现真卡死，start_to_close_timeout 只是兜底上限，
+        # 不需要精确。
         topic_count = len(trends["trending"])
-        generate_timeout = timedelta(seconds=120 + 150 * topic_count)
+        generate_timeout = timedelta(seconds=300 + topic_count * (90 + 150 * 7))
         return await workflow.execute_activity(
             generate_deep_dive_activity,
             trends,
             start_to_close_timeout=generate_timeout,
+            heartbeat_timeout=timedelta(seconds=90),
             retry_policy=default_retry,
         )
 

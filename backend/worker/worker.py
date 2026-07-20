@@ -48,7 +48,7 @@ from worker.fetch import (
     record_source_health_activity,
 )
 from worker.filter import filter_activity
-from worker.schemas import PipelineParams
+from worker.schemas import DeepDiveParams, PipelineParams
 from worker.workflows import (
     AInewsPipelineWorkflow,
     ArxivFulltextBackfillWorkflow,
@@ -128,6 +128,7 @@ async def ensure_deep_dive_schedule(client: Client) -> None:
             Schedule(
                 action=ScheduleActionStartWorkflow(
                     DeepDiveWorkflow.run,
+                    DeepDiveParams(),
                     id=f"{DEEP_DIVE_SCHEDULE_ID}-run",
                     task_queue=TASK_QUEUE,
                 ),

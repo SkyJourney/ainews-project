@@ -92,6 +92,16 @@ class TopicDeepDiveParams(BaseModel):
     window_end: date
 
 
+class DeepDiveParams(BaseModel):
+    """DeepDiveWorkflow（M10 周报）入参：window_end 可选，留空时 workflow 内部用
+    workflow.info().start_time 兜底生成（每周一 09:00 触发时覆盖到上周日为窗口终点，
+    仿 PipelineParams.batch_id 的既定模式）；手动回补历史某一周的报告时可显式指定，
+    例如用户要求重新生成上周报告时，不需要等到下周一 Schedule 自然触发才能补跑。
+    """
+
+    window_end: date | None = None
+
+
 class PreflightResult(BaseModel):
     """preflight_activity 的输出：源健康检查结果（04 §2.1）。"""
 

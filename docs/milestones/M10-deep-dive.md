@@ -77,3 +77,21 @@ M7 生产化收尾讨论时用户提出"这个后续做成独立 Temporal 工作
 ## 追加四：每个热门 topic 小节接入深度分析引擎，取代机械 bullet 列表（2026-07-09，M11 期间同日）
 
 M11（专题月报）首版真实产出后用户反馈"太浅薄，像罗列文章"，追溯发现周报的每个热门 topic 小节（`_render_trend_section`）从 M10 上线以来就是**纯机械 bullet 列表，全程没有 LLM 参与**，是这个观感的直接根因之一。这次重写是周报+月报共享的同一次改动，完整设计与真实验证记录在 [`M11-topic-deep-dive.md`「追加：深度叙事引擎重写」](./M11-topic-deep-dive.md#追加深度叙事引擎重写周报月报共享五维度分析--关系图2026-07-09同日)，不重复展开。周报侧的关键变化：`generate_deep_dive_activity` 现在给每个热门 topic 循环调用共享的 `_generate_topic_analysis`（五维度深度分析 + 关系图，深挖全文上限 5 篇），`DeepDiveWorkflow` 超时按热门话题数动态估算；原机械列表降级为小节末尾"参考文章"辅助链接。
+
+## 追加五：周报素材来源从 zettel 反查改为全部原文子主题聚类，与月报同构（2026-07-20）
+
+用户看了 7/13~7/19 这期周报后指出"只有一个 topic 有延续性/交叉验证/分歧/新兴信号，其他都是空的，似乎返回有问题"。排查确认这不是 LLM 调用异常，而是「追加四」接入深度分析引擎时遗留的一个真实数据源缺口：`generate_deep_dive_activity` 当时给每个热门 topic 查的分析素材是 `topic_deep_dive_list_zettel_documents_in_window`（zettel 反查），而 `zettel_worthy` 判定本身很苛刻——核查这一周实际数据，8 个热门 topic 里只有 `industry-moves` 凑够 2 篇 zettel，其余 7 个（含本周 200 篇原文的 research-papers）一篇都没有，直接触发 `_generate_topic_analysis` 的"素材皆空"机械兜底，展示成"本周该专题暂无可用于生成分析的素材"+ 四个空维度。这正是 M11 期间"追加：全部原文子主题聚类"已经诊断并修复过的同一类问题（[`M11-topic-deep-dive.md`「追加二/追加三」](./M11-topic-deep-dive.md)），但当时只把修复应用到了月报，代码注释里也留了痕迹（`_select_fulltext_original_ids` 函数文档明确写着"周报专用（月报...不再经过 zettel 反查）"）——是当时刻意的范围切分，没有跟进回补周报这一侧。
+
+**修复**：`generate_deep_dive_activity` 改用 `topic_deep_dive_list_original_documents_in_window` 查该 topic 本周**全部**原文（不再过滤 zettel），复用月报已有的 `_cluster_topic_articles`（子主题聚类，0 条有效线索时退化成"整个 topic 当一条线索"）+ `_select_cluster_fulltext_ids`（每子主题独立挑选深挖全文，上限沿用 `WEEKLY_TOPIC_FULLTEXT_LIMIT=5`，语义从"整个 topic 固定上限"变成"每子主题独立上限"）；`_render_topic_analysis_section`（周报单 topic 一段分析）替换成 `_render_topic_cluster_sections`（一个 topic 可能渲染多个子主题小节，结构与月报 `_build_topic_deep_dive_record` 一致），`_build_deep_dive_record` 的正文组装与 `link_targets` 按子主题校验逻辑同步调整。清理了随之变成死代码的 `_select_fulltext_original_ids`（deep_dive.py）与 `topic_deep_dive_list_zettel_documents_in_window`（db.py）。
+
+**单测同步重写**（`test_deep_dive.py` 100 个用例全部通过，全量套件 252 个通过），重建镜像重启后用 `temporal schedule trigger` 重新生成本期周报——**这次触发暴露了本次改动自身引入的问题，没有一次成功**，完整排查与最终真实验证结果见「追加六」，不在这里重复。详见 `.claude/memory/decisions.md`「周报素材来源从 zettel 反查改为全部原文子主题聚类」。
+
+## 追加六：部署后连续暴露三个真实 bug——超时预算/max_tokens/Schedule 定义未随代码更新（2026-07-20，同日）
+
+「追加五」部署后，用户要求顺手补跑历史周报验证效果，过程中连续触发三个独立故障，都源于"改了核心逻辑但没同步调整依赖这段逻辑固有特性的周边配置"：
+
+- **超时预算没跟上聚类改造**：`DeepDiveWorkflow` 给 `generate_deep_dive_activity` 的超时公式还是按旧版"每 topic 固定 1 次分析调用"估算（22分钟），改版后单个 topic 变成"1次聚类+最多7次子主题分析"，本周批次连续 3 次撞 `StartToClose timeout` 硬顶失败。修复：仿 `translate_activity` 的既定心跳模式，逐子主题分析完成后 `activity.heartbeat(...)`，超时改用宽裕的 worst-case 兜底 + `heartbeat_timeout=90s` 负责快速发现真卡死。
+- **聚类调用 max_tokens 不够用**：大 topic（`research-papers` 单周 200 篇原文）聚类输出体积大，`llm_client.DEFAULT_MAX_TOKENS=8000` 在上周(7/12)回补批次真实撞出 `IncompleteOutputException`，3 次重试确定性失败。修复：显式传 `max_tokens=16000`；顺带修复 `_cluster_topic_articles` prompt 硬编码"本月"（周报调用这个共享函数时素材明明是"本周"）的问题，新增必填 `window_label` 参数。
+- **Schedule 定义没有随 workflow 签名变化自动更新**：`DeepDiveWorkflow.run` 改成接收 `params: DeepDiveParams` 后，`ensure_deep_dive_schedule` 是"不存在才创建"的幂等模式，几周前就建好的 `ainews-deep-dive-weekly` Schedule 被判定"已存在"直接跳过，服务端保存的 Action 定义停留在旧的零参数版本，触发后 `DeepDiveWorkflow.run()` 缺参数直接抛 `TypeError`——跟当天早些时候 NUL 字节事故是同一种故障模式（Python 异常导致 workflow task 无限重试），只是诱因换成了配置漂移。处理：终止卡死实例 + 删除旧 Schedule 让 worker 重启时用当前代码重建。
+
+**真实验证**：三处修复同批次部署（单测新增 2 个，全量套件 254 个通过），重建镜像、确认无其他运行中工作流后重启；`schedule trigger` 重新生成本周报告（`deep-dive-2026-07-19`，`RunTime 25m52s`，`COMPLETED`）+ 手动指定 `window_end` 回补上周报告（`deep-dive-2026-07-12`，`RunTime 33m23s`，`COMPLETED`，验证了 `DeepDiveParams.window_end` 这个新增的手动回补能力）。两份都核实正文里"暂无可用于生成分析的素材"出现次数为 0（此前 7/8 个 topic 命中这句兜底文案），且产出了真实的多子主题结构——本周 8 个热门 topic 里 5 个识别出 5-7 条子主题、3 个（素材本身少）合理退化成 1 条；上周更丰富，8 个里 7 个产出 6-7 条子主题。详见 `.claude/memory/decisions.md`「周报 generate_deep_dive_activity 部署后连续暴露三个真实 bug」。

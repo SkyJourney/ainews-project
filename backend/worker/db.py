@@ -96,6 +96,21 @@ def record_fetch_failure(source_name: str, reason: str) -> None:
         )
 
 
+def _strip_nul_bytes(value):
+    """PostgreSQL text/JSONB 字段都不接受 \\x00：抓取/翻译产出偶发夹带 NUL 字节会导致
+    upsert 永久失败（2026-07-18 enrich-98 卡死事故：NUL 字节反复触发同样的写库报错，
+    异常信息里回带的非法字节又把 Temporal workflow task 的序列化一起搞崩，父工作流
+    跟着卡死两天），入库前统一清洗，而不是等 Postgres 报错才发现。
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_nul_bytes(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_nul_bytes(v) for k, v in value.items()}
+    return value
+
+
 def upsert_enriched_article(
     *,
     url: str,
@@ -170,21 +185,21 @@ def upsert_enriched_article(
                 "url": url,
                 "source_name": source_name,
                 "batch_id": batch_id,
-                "fetched_title": fetched_title,
-                "fetched_summary": fetched_summary,
-                "original_text": original_text,
+                "fetched_title": _strip_nul_bytes(fetched_title),
+                "fetched_summary": _strip_nul_bytes(fetched_summary),
+                "original_text": _strip_nul_bytes(original_text),
                 "translation_needed": translation_needed,
-                "translated_title": translated_title,
-                "translated_summary": translated_summary,
-                "gist": gist,
+                "translated_title": _strip_nul_bytes(translated_title),
+                "translated_summary": _strip_nul_bytes(translated_summary),
+                "gist": _strip_nul_bytes(gist),
                 "content_hash": content_hash,
                 "fetch_channel": fetch_channel,
                 "published_at": published_at,
-                "entities": json.dumps(entities if entities is not None else []),
-                "content_type": content_type,
-                "novelty_signal": json.dumps(novelty_signal if novelty_signal is not None else {}),
+                "entities": json.dumps(_strip_nul_bytes(entities) if entities is not None else []),
+                "content_type": _strip_nul_bytes(content_type),
+                "novelty_signal": json.dumps(_strip_nul_bytes(novelty_signal) if novelty_signal is not None else {}),
                 "word_count": word_count,
-                "translation_fallback_notice": translation_fallback_notice,
+                "translation_fallback_notice": _strip_nul_bytes(translation_fallback_notice),
                 "arxiv_fulltext_pending": arxiv_fulltext_pending,
             },
         )
@@ -365,11 +380,12 @@ def deep_dive_list_digest_documents_in_window(window_start: date, window_end: da
 def topic_deep_dive_list_original_documents_in_window(
     topic_slug: str, window_start: date, window_end: date
 ) -> list[dict]:
-    """`worker/deep_dive.py` 专题月报（M11）专用：取窗口内指定 topic 桶的全部原文归档
-    明细，供机械统计该桶本月 entry_count/逐日分布，以及子主题聚类（2026-07-09 深度改版
-    二起——聚类素材是该 topic 本月**全部**原文，不再经过 zettel 过滤，所以这里带上
-    `gist`；同样不重新聚类 topic 归属，直接按已有 topic_slug 过滤——M10 周报"跨文章判断
-    只能发生在 aggregate 阶段"这条铁律的延伸）。
+    """`worker/deep_dive.py` 专题月报（M11）+ 周报（M10，2026-07-20 起同构）共用：取窗口内
+    指定 topic 桶的全部原文归档明细，供机械统计该桶本期 entry_count/逐日分布，以及子
+    主题聚类（聚类素材是该 topic 本期**全部**原文，不经过 zettel 过滤，所以这里带上
+    `gist`；同样不重新聚类 topic 归属，直接按已有 topic_slug 过滤——"跨文章判断只能
+    发生在 aggregate 阶段"这条铁律的延伸），周报还额外用它查上一周同 topic 的延续性
+    对比素材。
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -387,41 +403,13 @@ def topic_deep_dive_list_original_documents_in_window(
     return [dict(row) for row in rows]
 
 
-def topic_deep_dive_list_zettel_documents_in_window(
-    topic_slug: str, window_start: date, window_end: date
-) -> list[dict]:
-    """`worker/deep_dive.py` 周报（M10）专用：取窗口内指定 topic 桶的全部 zettel——这是
-    周报每个热门 topic 深度分析的叙事骨架素材（zettel 本身就是"概念首次出现/重大事件
-    锚点/可复用洞察"的精炼原子笔记），自带 `original_id` 供反查全文做"深挖细节"。
-    专题月报（M11）2026-07-09 深度改版二起不再调用这个函数——月报的深挖池改为该 topic
-    本月全部原文（不经过 zettel 过滤，见 `deep_dive.py::_cluster_topic_articles`），
-    zettel 只是"是否值得单独建原子笔记"的独立判断，不能拿来当深度报告的准入门槛。
-    """
-    engine = get_engine()
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT id AS doc_id, doc_date, title,
-                       frontmatter->>'gist' AS gist,
-                       frontmatter->>'original_id' AS original_id
-                FROM documents
-                WHERE doc_type = 'zettel' AND frontmatter->>'topic_slug' = :topic_slug
-                  AND doc_date BETWEEN :window_start AND :window_end
-                """
-            ),
-            {"topic_slug": topic_slug, "window_start": window_start, "window_end": window_end},
-        ).mappings().all()
-    return [dict(row) for row in rows]
-
-
 def topic_deep_dive_fetch_original_fulltext(doc_ids: list[str]) -> list[dict]:
     """`worker/deep_dive.py` 专题月报（M11）/周报（M10）共用：按 doc_id 批量取 original
-    全文正文（`body_md`），只取每个子主题/热门 topic 内挑选出的一个子集（月报每子主题
-    最多 `CLUSTER_FULLTEXT_LIMIT` 篇，周报每 topic 最多 `WEEKLY_TOPIC_FULLTEXT_LIMIT`
-    篇，见 deep_dive.py），不是窗口内全部原文——控制喂给 LLM 网关单次调用的体积（总
-    深挖篇数会随子主题/热门 topic 数量自然放大，2026-07-09 深度改版二起不再是整个
-    topic 固定一个上限）。`doc_ids` 为空时不查库直接返回空列表。
+    全文正文（`body_md`），只取每个子主题挑选出的一个子集（月报每子主题最多
+    `CLUSTER_FULLTEXT_LIMIT` 篇，周报每子主题最多 `WEEKLY_TOPIC_FULLTEXT_LIMIT` 篇，
+    见 deep_dive.py），不是窗口内全部原文——控制喂给 LLM 网关单次调用的体积（总深挖
+    篇数会随子主题数量自然放大，不是整个 topic 固定一个上限）。`doc_ids` 为空时不
+    查库直接返回空列表。
     """
     if not doc_ids:
         return []

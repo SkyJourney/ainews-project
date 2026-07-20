@@ -268,9 +268,8 @@ def test_build_deep_dive_record_includes_bar_and_pie_but_not_quadrant_for_single
             "total_count": 5,
             "active_days": 3,
             "representatives": [{"doc_id": "o1", "title": "t", "source_name": "s", "gist": "g"}],
-            "zettels": [],
+            "cluster_sections": [{"heading": "子主题", "doc_ids": ["original-abc"], "analysis": make_analysis()}],
             "fulltext_ids": [],
-            "analysis": make_analysis(),
         }
     ]
     daily_counts = [{"date": "2026-07-01", "count": 5}]
@@ -290,9 +289,8 @@ def test_build_deep_dive_record_skips_chart_without_stray_blank_when_lint_fails(
             "total_count": 5,
             "active_days": 3,
             "representatives": [{"doc_id": "o1", "title": "t", "source_name": "s", "gist": "g"}],
-            "zettels": [],
+            "cluster_sections": [{"heading": "子主题", "doc_ids": ["original-abc"], "analysis": make_analysis()}],
             "fulltext_ids": [],
-            "analysis": make_analysis(),
         }
     ]
     daily_counts = [{"date": "2026-07-01", "count": 5}]
@@ -309,18 +307,16 @@ def test_build_deep_dive_record_includes_all_three_charts_for_multiple_topics():
             "total_count": 5,
             "active_days": 3,
             "representatives": [{"doc_id": "o1", "title": "t", "source_name": "s", "gist": "g"}],
-            "zettels": [],
+            "cluster_sections": [{"heading": "子主题", "doc_ids": ["original-abc"], "analysis": make_analysis()}],
             "fulltext_ids": [],
-            "analysis": make_analysis(),
         },
         {
             "slug": "model-releases",
             "total_count": 3,
             "active_days": 2,
             "representatives": [{"doc_id": "o2", "title": "t2", "source_name": "s", "gist": "g"}],
-            "zettels": [],
+            "cluster_sections": [{"heading": "子主题", "doc_ids": ["original-def"], "analysis": make_analysis()}],
             "fulltext_ids": [],
-            "analysis": make_analysis(),
         },
     ]
     daily_counts = [{"date": "2026-07-01", "count": 8}]
@@ -361,9 +357,8 @@ def test_build_deep_dive_record_link_targets_exclude_digest_ids():
             "total_count": 5,
             "active_days": 3,
             "representatives": [{"doc_id": "original-abc", "title": "t", "source_name": "s", "gist": "g"}],
-            "zettels": [],
+            "cluster_sections": [{"heading": "子主题", "doc_ids": ["original-def"], "analysis": make_analysis()}],
             "fulltext_ids": [],
-            "analysis": make_analysis(),
         }
     ]
     digests = [{"doc_id": "digest-2026-07-01", "doc_date": date(2026, 7, 1), "body_md": "内容"}]
@@ -374,22 +369,26 @@ def test_build_deep_dive_record_link_targets_exclude_digest_ids():
 
 
 def test_build_deep_dive_record_link_targets_include_cited_analysis_material():
-    """五维度分析正文里引用到的候选素材（zettel/深挖原文）应该进 link_targets，未引用
-    的和编造的（不在候选素材里的）都不应该进。"""
-    zettels = [make_zettel_row(doc_id="z1", doc_date=date(2026, 7, 1))]
+    """五维度分析正文里引用到的候选素材（子主题深挖原文/骨架素材）应该进 link_targets，
+    未引用的和编造的（不在候选素材里的）都不应该进。"""
     trending = [
         {
             "slug": "agents",
             "total_count": 5,
             "active_days": 3,
             "representatives": [],
-            "zettels": zettels,
+            "cluster_sections": [
+                {
+                    "heading": "子主题",
+                    "doc_ids": ["z1", "original-x"],
+                    "analysis": make_analysis(
+                        deep_summary="本周关注 [[z1]] 的进展",
+                        cross_validation="[[original-x]] 与 [[z1]] 相互印证",
+                        emerging="[[not-in-material]] 是编造的引用",
+                    ),
+                }
+            ],
             "fulltext_ids": ["original-x"],
-            "analysis": make_analysis(
-                deep_summary="本周关注 [[z1]] 的进展",
-                cross_validation="[[original-x]] 与 [[z1]] 相互印证",
-                emerging="[[not-in-material]] 是编造的引用",
-            ),
         }
     ]
     record = deep_dive._build_deep_dive_record(date(2026, 7, 1), date(2026, 7, 7), trending, 5, [], "导语", [])
@@ -435,6 +434,7 @@ def test_generate_deep_dive_activity_coerces_string_window_dates(mocker):
     不能在 _build_deep_dive_record 调用 .isoformat() 时报 AttributeError。"""
     mocker.patch.object(deep_dive, "deep_dive_list_digest_documents_in_window", return_value=[])
     mocker.patch.object(deep_dive, "call_structured")
+    mocker.patch.object(deep_dive, "activity")
     write_activity_mock = mocker.patch.object(deep_dive, "write_activity", return_value=1)
 
     payload = {
@@ -454,6 +454,7 @@ def test_generate_deep_dive_activity_coerces_string_window_dates(mocker):
 def test_generate_deep_dive_activity_writes_single_record(mocker):
     mocker.patch.object(deep_dive, "deep_dive_list_digest_documents_in_window", return_value=[])
     mocker.patch.object(deep_dive, "call_structured")
+    mocker.patch.object(deep_dive, "activity")
     write_activity_mock = mocker.patch.object(deep_dive, "write_activity", return_value=1)
 
     payload = {
@@ -473,22 +474,29 @@ def test_generate_deep_dive_activity_writes_single_record(mocker):
 
 
 def test_generate_deep_dive_activity_generates_per_topic_analysis(mocker):
-    """2026-07-09 深度改版：每个热门 topic 独立查 zettel/上周同期zettel/深挖全文，调
-    _generate_topic_analysis 生成深度分析，取代早期机械 bullet 列表。验证每个 topic 都
-    触发了一次 LLM 调用（1次整体导语 + N次topic分析），且深挖全文篇数上限用周报专属的
-    WEEKLY_TOPIC_FULLTEXT_LIMIT（不是月报每子主题的 CLUSTER_FULLTEXT_LIMIT）。"""
+    """2026-07-20 改版：每个热门 topic 独立查本周全部原文（不再是 zettel 反查，见
+    .claude/memory/decisions.md 周报聚类修复记录）并子主题聚类，逐子主题调
+    _generate_topic_analysis 生成深度分析，取代早期机械 bullet 列表。验证触发了 3 次
+    LLM 调用（1次整体导语 + 1次子主题聚类 + 1次该唯一子主题的深度分析），且深挖全文
+    篇数上限用周报专属的 WEEKLY_TOPIC_FULLTEXT_LIMIT（不是月报每子主题的
+    CLUSTER_FULLTEXT_LIMIT）。"""
     mocker.patch.object(deep_dive, "deep_dive_list_digest_documents_in_window", return_value=[])
-    zettels = [make_zettel_row(doc_id=f"z{i}", doc_date=date(2026, 7, 1 + i), original_id=f"original-{i}") for i in range(8)]
-    zettel_mock = mocker.patch.object(deep_dive, "topic_deep_dive_list_zettel_documents_in_window", return_value=zettels)
+    articles = [make_original_row(doc_id=f"o{i}", doc_date=date(2026, 7, 1 + i), topic_slug="agents") for i in range(8)]
+    articles_mock = mocker.patch.object(
+        deep_dive, "topic_deep_dive_list_original_documents_in_window", return_value=articles
+    )
     fulltext_mock = mocker.patch.object(deep_dive, "topic_deep_dive_fetch_original_fulltext", return_value=[])
-    # 第 1 次调用是 _generate_intro（要求 .intro 字段），后续每个热门 topic 各一次是
-    # _generate_topic_analysis（要求 .deep_summary/.continuity 等字段）——两种 mock 形状不同，
-    # 用 side_effect 按调用顺序区分，不能用同一个 return_value 糊弄过去。
+    cluster_mock = make_cluster_mock(mocker, "唯一线索", [f"o{i}" for i in range(8)])
+    # 第 1 次调用是 _generate_intro（要求 .intro 字段），第 2 次是 _cluster_topic_articles
+    # （要求 .clusters 字段），第 3 次是该热门 topic 唯一子主题的 _generate_topic_analysis
+    # （要求 .deep_summary/.continuity 等字段）——三种 mock 形状不同，用 side_effect 按
+    # 调用顺序区分，不能用同一个 return_value 糊弄过去。
     call_structured_mock = mocker.patch.object(
         deep_dive,
         "call_structured",
-        side_effect=[mocker.Mock(intro="整体导语"), make_analysis_result_mock(mocker)],
+        side_effect=[mocker.Mock(intro="整体导语"), mocker.Mock(clusters=[cluster_mock]), make_analysis_result_mock(mocker)],
     )
+    mocker.patch.object(deep_dive, "activity")
     mocker.patch.object(deep_dive, "write_activity", return_value=1)
 
     payload = {
@@ -507,15 +515,46 @@ def test_generate_deep_dive_activity_generates_per_topic_analysis(mocker):
     }
     deep_dive.generate_deep_dive_activity(payload)
 
-    # 1 次整体导语调用 + 1 次该热门 topic 的深度分析调用
-    assert call_structured_mock.call_count == 2
-    # 该 topic 当前窗口 + 上周同期窗口，各查一次 zettel
-    assert zettel_mock.call_count == 2
-    zettel_mock.assert_any_call("agents", date(2026, 7, 1), date(2026, 7, 7))
-    zettel_mock.assert_any_call("agents", date(2026, 6, 24), date(2026, 6, 30))
-    # 深挖全文篇数上限用周报专属的 5，不是月报的 10
+    assert call_structured_mock.call_count == 3
+    # 该 topic 当前窗口 + 上周同期窗口，各查一次全部原文
+    assert articles_mock.call_count == 2
+    articles_mock.assert_any_call("agents", date(2026, 7, 1), date(2026, 7, 7))
+    articles_mock.assert_any_call("agents", date(2026, 6, 24), date(2026, 6, 30))
+    # 深挖全文篇数上限用周报专属的 5，不是月报的 8
     called_ids = fulltext_mock.call_args[0][0]
     assert len(called_ids) == deep_dive.WEEKLY_TOPIC_FULLTEXT_LIMIT
+
+
+def test_generate_deep_dive_activity_falls_back_to_single_cluster_when_clustering_empty(mocker):
+    """聚类返回 0 条有效线索时（LLM 判断失误或素材过于同质），退化成"整个 topic 当一条
+    线索"，不能因为聚类失败就让这个热门 topic 在周报里开天窗——与月报
+    compute_topic_deep_dive_stats_activity 的兜底逻辑一致。"""
+    mocker.patch.object(deep_dive, "deep_dive_list_digest_documents_in_window", return_value=[])
+    articles = [
+        make_original_row(doc_id="o1", doc_date=date(2026, 7, 5), topic_slug="agents"),
+        make_original_row(doc_id="o2", doc_date=date(2026, 7, 6), topic_slug="agents"),
+    ]
+    mocker.patch.object(deep_dive, "topic_deep_dive_list_original_documents_in_window", return_value=articles)
+    mocker.patch.object(deep_dive, "topic_deep_dive_fetch_original_fulltext", return_value=[])
+    mocker.patch.object(
+        deep_dive,
+        "call_structured",
+        side_effect=[mocker.Mock(intro="整体导语"), mocker.Mock(clusters=[]), make_analysis_result_mock(mocker)],
+    )
+    mocker.patch.object(deep_dive, "activity")
+    write_activity_mock = mocker.patch.object(deep_dive, "write_activity", return_value=1)
+
+    payload = {
+        "window_start": date(2026, 7, 1),
+        "window_end": date(2026, 7, 7),
+        "entry_count": 5,
+        "trending": [{"slug": "agents", "total_count": 5, "active_days": 3, "representatives": []}],
+        "daily_counts": [],
+    }
+    deep_dive.generate_deep_dive_activity(payload)
+
+    written_records = write_activity_mock.call_args[0][0]
+    assert "本周「Agent」识别出 1 条主要线索：「Agent」" in written_records[0]["body_md"]
 
 
 # ===========================================================================
@@ -601,27 +640,6 @@ def test_select_monthly_zettel_material_no_truncation_when_under_limit():
 
 
 # ---------------------------------------------------------------------------
-# _select_fulltext_original_ids
-# ---------------------------------------------------------------------------
-
-def test_select_fulltext_original_ids_orders_by_zettel_recency_and_dedupes():
-    zettels = [
-        make_zettel_row(doc_id="z1", doc_date=date(2026, 7, 1), original_id="original-a"),
-        make_zettel_row(doc_id="z2", doc_date=date(2026, 7, 5), original_id="original-b"),
-        make_zettel_row(doc_id="z3", doc_date=date(2026, 7, 3), original_id="original-a"),  # 重复 original_id
-    ]
-    ids = deep_dive._select_fulltext_original_ids(zettels, limit=10)
-    assert ids == ["original-b", "original-a"]
-
-
-def test_select_fulltext_original_ids_caps_at_limit():
-    zettels = [make_zettel_row(doc_id=f"z{i}", doc_date=date(2026, 7, 1 + i), original_id=f"original-{i}") for i in range(15)]
-    ids = deep_dive._select_fulltext_original_ids(zettels, limit=10)
-    assert len(ids) == 10
-    assert ids[0] == "original-14"  # 最新的 zettel 对应的 original 排在最前
-
-
-# ---------------------------------------------------------------------------
 # _cluster_topic_articles（2026-07-09 深度改版二：子主题聚类，取代 zettel 门控素材）
 # ---------------------------------------------------------------------------
 
@@ -631,7 +649,7 @@ def make_cluster_mock(mocker, heading: str, doc_ids: list[str]):
 
 def test_cluster_topic_articles_returns_empty_when_no_articles(mocker):
     call_structured_mock = mocker.patch.object(deep_dive, "call_structured")
-    assert deep_dive._cluster_topic_articles("agents", []) == []
+    assert deep_dive._cluster_topic_articles("agents", [], "本月") == []
     call_structured_mock.assert_not_called()
 
 
@@ -646,7 +664,7 @@ def test_cluster_topic_articles_calls_llm_with_all_articles_not_zettel_gated(moc
         make_original_row(doc_id="o1", doc_date=date(2026, 7, 1), topic_slug="agents", title="文章一", gist="摘要一"),
         make_original_row(doc_id="o2", doc_date=date(2026, 7, 2), topic_slug="agents", title="文章二", gist="摘要二"),
     ]
-    clusters = deep_dive._cluster_topic_articles("agents", articles)
+    clusters = deep_dive._cluster_topic_articles("agents", articles, "本月")
 
     assert clusters == [{"heading": "线索A", "doc_ids": ["o1", "o2"]}]
     call_structured_mock.assert_called_once()
@@ -654,6 +672,33 @@ def test_cluster_topic_articles_calls_llm_with_all_articles_not_zettel_gated(moc
     user_content = call_structured_mock.call_args.kwargs["user_content"]
     assert "o1" in user_content and "文章一" in user_content
     assert "o2" in user_content and "文章二" in user_content
+
+
+def test_cluster_topic_articles_uses_window_label_in_prompt(mocker):
+    """window_label 要真的传进 prompt——周报传"本周"，月报传"本月"，不能因为共用同一个
+    函数就让周报的聚类调用还带着"本月"字样误导模型。"""
+    result_mock = mocker.Mock(clusters=[])
+    call_structured_mock = mocker.patch.object(deep_dive, "call_structured", return_value=result_mock)
+    articles = [make_original_row(doc_id="o1", doc_date=date(2026, 7, 1), topic_slug="agents")]
+
+    deep_dive._cluster_topic_articles("agents", articles, "本周")
+
+    assert "本周" in call_structured_mock.call_args.kwargs["system_prompt"]
+    assert "本周" in call_structured_mock.call_args.kwargs["user_content"]
+    assert "本月" not in call_structured_mock.call_args.kwargs["system_prompt"]
+
+
+def test_cluster_topic_articles_uses_generous_max_tokens(mocker):
+    """候选文章多的大 topic 分出的子主题可能各自关联几十个 doc_id，结构化输出体积本身
+    就大——2026-07-20 周报回补真实撞过 llm_client.DEFAULT_MAX_TOKENS（8000）导致的
+    IncompleteOutputException，这里必须显式传更宽松的上限，不能依赖默认值。"""
+    result_mock = mocker.Mock(clusters=[])
+    call_structured_mock = mocker.patch.object(deep_dive, "call_structured", return_value=result_mock)
+    articles = [make_original_row(doc_id="o1", doc_date=date(2026, 7, 1), topic_slug="agents")]
+
+    deep_dive._cluster_topic_articles("agents", articles, "本月")
+
+    assert call_structured_mock.call_args.kwargs["max_tokens"] == 16000
 
 
 def test_cluster_topic_articles_filters_fabricated_doc_ids(mocker):
@@ -665,7 +710,7 @@ def test_cluster_topic_articles_filters_fabricated_doc_ids(mocker):
     mocker.patch.object(deep_dive, "call_structured", return_value=result_mock)
 
     articles = [make_original_row(doc_id="o1", doc_date=date(2026, 7, 1), topic_slug="agents")]
-    clusters = deep_dive._cluster_topic_articles("agents", articles)
+    clusters = deep_dive._cluster_topic_articles("agents", articles, "本月")
 
     assert clusters == [{"heading": "线索A", "doc_ids": ["o1"]}]
 
@@ -679,7 +724,7 @@ def test_cluster_topic_articles_truncates_skeleton_at_limit(mocker):
     articles = [
         make_original_row(doc_id=f"o{i}", doc_date=date(2026, 7, 1), topic_slug="agents") for i in range(300)
     ]
-    deep_dive._cluster_topic_articles("agents", articles)
+    deep_dive._cluster_topic_articles("agents", articles, "本月")
 
     user_content = call_structured_mock.call_args.kwargs["user_content"]
     assert user_content.count("- [[o") == deep_dive.CLUSTER_SKELETON_LIMIT
@@ -809,16 +854,19 @@ def test_generate_topic_analysis_filters_relationships_to_valid_material_ids(moc
 
 
 # ---------------------------------------------------------------------------
-# _render_topic_analysis_section
+# _render_topic_cluster_sections
 # ---------------------------------------------------------------------------
 
-def test_render_topic_analysis_section_includes_all_dimensions():
+def test_render_topic_cluster_sections_includes_all_dimensions():
     analysis = make_analysis(
         deep_summary="总览文本", continuity="延续文本", cross_validation="交叉文本",
         tensions="分歧文本", emerging="新兴文本",
     )
-    section = deep_dive._render_topic_analysis_section("agents", analysis)
+    cluster_sections = [{"heading": "唯一线索", "doc_ids": ["o1"], "analysis": analysis}]
+    section = deep_dive._render_topic_cluster_sections("agents", cluster_sections)
     assert deep_dive.topic_heading("agents") in section
+    assert "识别出 1 条主要线索" in section
+    assert "### 唯一线索" in section
     assert "总览文本" in section
     assert "**延续性**：延续文本" in section
     assert "**交叉验证**：交叉文本" in section
@@ -826,28 +874,48 @@ def test_render_topic_analysis_section_includes_all_dimensions():
     assert "**新兴信号**：新兴文本" in section
 
 
-def test_render_topic_analysis_section_appends_representatives_when_provided():
-    analysis = make_analysis()
+def test_render_topic_cluster_sections_renders_one_section_per_cluster():
+    cluster_sections = [
+        {"heading": "线索A", "doc_ids": ["o1"], "analysis": make_analysis(deep_summary="A的总览")},
+        {"heading": "线索B", "doc_ids": ["o2"], "analysis": make_analysis(deep_summary="B的总览")},
+    ]
+    section = deep_dive._render_topic_cluster_sections("agents", cluster_sections)
+    assert "识别出 2 条主要线索" in section
+    assert "### 线索A" in section
+    assert "A的总览" in section
+    assert "### 线索B" in section
+    assert "B的总览" in section
+
+
+def test_render_topic_cluster_sections_notes_absence_when_no_clusters():
+    """0 个子主题（该 topic 本周窗口内确实没有任何原文，理论上不会发生，防御性兜底）
+    也要正常产出小节，不能开天窗。"""
+    section = deep_dive._render_topic_cluster_sections("agents", [])
+    assert "本周该专题暂无可用于生成分析的素材。" in section
+
+
+def test_render_topic_cluster_sections_appends_representatives_when_provided():
+    cluster_sections = [{"heading": "线索", "doc_ids": ["o1"], "analysis": make_analysis()}]
     representatives = [{"doc_id": "o1", "title": "标题", "source_name": "openai-rss", "gist": "摘要"}]
-    section = deep_dive._render_topic_analysis_section("agents", analysis, representatives)
+    section = deep_dive._render_topic_cluster_sections("agents", cluster_sections, representatives)
     assert "**参考文章**" in section
     assert "[[o1]] 标题（来源：openai-rss）：摘要" in section
 
 
-def test_render_topic_analysis_section_omits_representatives_when_not_provided():
-    """月报调用不传 representatives，不应该出现"参考文章"小标题。"""
-    analysis = make_analysis()
-    section = deep_dive._render_topic_analysis_section("agents", analysis)
+def test_render_topic_cluster_sections_omits_representatives_when_not_provided():
+    cluster_sections = [{"heading": "线索", "doc_ids": ["o1"], "analysis": make_analysis()}]
+    section = deep_dive._render_topic_cluster_sections("agents", cluster_sections)
     assert "**参考文章**" not in section
 
 
-def test_render_topic_analysis_section_includes_relationship_chart_when_present():
+def test_render_topic_cluster_sections_includes_relationship_chart_when_present():
     analysis = make_analysis(
         relationships=[
             {"from_id": "z1", "from_title": "笔记一", "to_id": "z2", "to_title": "笔记二", "relation": "corroborates", "label": "相互印证"}
         ]
     )
-    section = deep_dive._render_topic_analysis_section("agents", analysis)
+    cluster_sections = [{"heading": "线索", "doc_ids": ["z1", "z2"], "analysis": analysis}]
+    section = deep_dive._render_topic_cluster_sections("agents", cluster_sections)
     assert "```mermaid" in section
     assert "flowchart LR" in section
 
